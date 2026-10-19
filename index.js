@@ -536,7 +536,7 @@ export async function runScreeningCycle({ silent = false } = {}) {
 
       const block = [
         `POOL: ${pool.name} (${pool.pool})`,
-        `  metrics: bin_step=${pool.bin_step}, fee_pct=${pool.fee_pct}%, fee_tvl=${pool.fee_active_tvl_ratio}, vol=$${pool.volume_window}, tvl=$${pool.tvl ?? pool.active_tvl}, volatility_${pool.volatility_timeframe || "30m"}=${pool.volatility}, mcap=$${pool.mcap}, organic=${pool.organic_score}${pool.token_age_hours != null ? `, age=${pool.token_age_hours}h` : ""}`,
+        `  metrics: bin_step=${pool.bin_step}, fee_pct=${pool.fee_pct}%, fee_tvl=${pool.fee_active_tvl_ratio}, fee24h=${pool.fee_active_tvl_ratio_24h ?? "?"}%, px24h=${pool.price_change_24h_pct ?? "?"}%, vol=$${pool.volume_window}, tvl=$${pool.tvl ?? pool.active_tvl}, volatility_${pool.volatility_timeframe || "30m"}=${pool.volatility}, mcap=$${pool.mcap}, organic=${pool.organic_score}${pool.token_age_hours != null ? `, age=${pool.token_age_hours}h` : ""}`,
         `  audit: top10=${top10Pct}%, bots=${botPct}%, fees=${feesSol}SOL${launchpad ? `, launchpad=${launchpad}` : ""}`,
         pvpLine,
         `  smart_wallets: ${sw?.in_pool?.length ?? 0} present${sw?.in_pool?.length ? ` → CONFIDENCE BOOST (${sw.in_pool.map(w => w.name).join(", ")})` : ""}`,
@@ -1915,6 +1915,11 @@ Commands:
       console.log(`  minTvl:               ${s.minTvl}`);
       console.log(`  maxTvl:               ${s.maxTvl}`);
       console.log(`  minVolume:            ${s.minVolume}`);
+      console.log(`  minMcap:              ${s.minMcap}`);
+      console.log(`  minTokenAgeHours:     ${s.minTokenAgeHours}`);
+      console.log(`  minFeeActiveTvl24h:   ${s.minFeeActiveTvl24h}`);
+      console.log(`  maxAbsPriceChange24hPct: ${s.maxAbsPriceChange24hPct}`);
+      console.log(`  minFeePerTvl24h:      ${config.management.minFeePerTvl24h}`);
       console.log(`  minTokenFeesSol:      ${s.minTokenFeesSol}`);
       console.log(`  maxBotHoldersPct:     ${s.maxBotHoldersPct}`);
       console.log(`  maxTop10Pct:          ${s.maxTop10Pct}`);

@@ -95,11 +95,11 @@ const PRESETS = {
     minOrganic:            60,
     minQuoteOrganic:       60,
     minHolders:            1_000,
-    minMcap:               150_000,
+    minMcap:               1_000_000,
     maxMcap:               5_000_000,
     minTvl:                5_000,
     maxTvl:                100_000,
-    minVolume:             1_000,
+    minVolume:             0,
     minBinStep:            80,
     maxBinStep:            125,
     minFeeActiveTvlRatio:  0.15,
@@ -113,7 +113,7 @@ const PRESETS = {
     positionSizePct:       0.5,
     gasReserve:            0.15,
     maxDeployAmount:       50,
-    minFeePerTvl24h:       20,
+    minFeePerTvl24h:       3,
     minAgeBeforeYieldCheck: 30,
     minClaimAmount:        3,
     oorCooldownTriggerCount: 3,
@@ -132,11 +132,11 @@ const PRESETS = {
     minOrganic:            70,
     minQuoteOrganic:       70,
     minHolders:            2_000,
-    minMcap:               150_000,
+    minMcap:               1_000_000,
     maxMcap:               10_000_000,
     minTvl:                10_000,
     maxTvl:                150_000,
-    minVolume:             2_000,
+    minVolume:             0,
     minBinStep:            80,
     maxBinStep:            125,
     minFeeActiveTvlRatio:  0.4,
@@ -150,7 +150,7 @@ const PRESETS = {
     positionSizePct:       0.35,
     gasReserve:            0.2,
     maxDeployAmount:       50,
-    minFeePerTvl24h:       25,
+    minFeePerTvl24h:       3,
     minAgeBeforeYieldCheck: 60,
     minClaimAmount:        5,
     oorCooldownTriggerCount: 3,
@@ -169,11 +169,11 @@ const PRESETS = {
     minOrganic:            75,
     minQuoteOrganic:       75,
     minHolders:            5_000,
-    minMcap:               500_000,
+    minMcap:               1_000_000,
     maxMcap:               10_000_000,
     minTvl:                20_000,
     maxTvl:                200_000,
-    minVolume:             10_000,
+    minVolume:             0,
     minBinStep:            80,
     maxBinStep:            125,
     minFeeActiveTvlRatio:  2.0,
@@ -187,7 +187,7 @@ const PRESETS = {
     positionSizePct:       0.25,
     gasReserve:            0.25,
     maxDeployAmount:       30,
-    minFeePerTvl24h:       30,
+    minFeePerTvl24h:       3,
     minAgeBeforeYieldCheck: 90,
     minClaimAmount:        5,
     oorCooldownTriggerCount: 3,
@@ -385,7 +385,7 @@ const minHolders = await askNum(
 
 const minMcap = await askNum(
   "Min token market cap USD",
-  p("minMcap", 150_000),
+  p("minMcap", 1_000_000),
   { min: 0 }
 );
 
@@ -511,7 +511,7 @@ console.log("\n── Management Advanced ────────────�
 
 const minFeePerTvl24h = await askNum(
   "Min fee/TVL 24h % (low yield close threshold)",
-  p("minFeePerTvl24h", 7),
+  p("minFeePerTvl24h", 3),
   { min: 0 }
 );
 

@@ -100,6 +100,35 @@ function isUsableVolatility(value) {
   return Number.isFinite(n) && n > 0;
 }
 
+// Larger of the reported window change and the price_trend endpoint move.
+// A 0% change field with a trending path still counts as a trend.
+function absolutePriceChangePct(changePct, priceTrend) {
+  const values = [];
+  const direct = numeric(changePct);
+  if (direct != null) values.push(Math.abs(direct));
+  if (Array.isArray(priceTrend) && priceTrend.length >= 2) {
+    const first = numeric(priceTrend[0]);
+    const last = numeric(priceTrend[priceTrend.length - 1]);
+    if (first != null && last != null && first > 0) {
+      values.push(Math.abs((last - first) / first * 100));
+    }
+  }
+  if (values.length === 0) return null;
+  return Math.max(...values);
+}
+
+function qualification24hEnabled(s) {
+  const fee = numeric(s?.minFeeActiveTvl24h);
+  const maxAbs = numeric(s?.maxAbsPriceChange24hPct);
+  return (fee != null && fee > 0) || maxAbs != null;
+}
+
+function stamp24hMetrics(pool, source) {
+  pool.fee_active_tvl_ratio_24h = numeric(source?.fee_active_tvl_ratio);
+  pool.pool_price_change_pct_24h = numeric(source?.pool_price_change_pct);
+  pool.price_trend_24h = Array.isArray(source?.price_trend) ? source.price_trend : null;
+}
+
 function includesCaseInsensitive(values, value) {
   if (!Array.isArray(values) || values.length === 0 || !value) return false;
   const needle = String(value).toLowerCase();
@@ -131,7 +160,7 @@ function getVolatilityTimeframe(sourceTimeframe) {
   return sourceMinutes != null && sourceMinutes >= minMinutes ? source : MIN_VOLATILITY_TIMEFRAME;
 }
 
-function getRawPoolScreeningRejectReason(pool, s) {
+export function getRawPoolScreeningRejectReason(pool, s) {
   const base = pool?.token_x || {};
   const quote = pool?.token_y || {};
   const binStep = numeric(pool?.dlmm_params?.bin_step);
@@ -157,7 +186,9 @@ function getRawPoolScreeningRejectReason(pool, s) {
   if (mcap == null || mcap < s.minMcap) return `mcap ${mcap ?? "unknown"} below minMcap ${s.minMcap}`;
   if (mcap > s.maxMcap) return `mcap ${mcap} above maxMcap ${s.maxMcap}`;
   if (holders == null || holders < s.minHolders) return `holders ${holders ?? "unknown"} below minHolders ${s.minHolders}`;
-  if (volume == null || volume < s.minVolume) return `volume ${volume ?? "unknown"} below minVolume ${s.minVolume}`;
+  if (numeric(s.minVolume) > 0 && (volume == null || volume < s.minVolume)) {
+    return `volume ${volume ?? "unknown"} below minVolume ${s.minVolume}`;
+  }
   if (tvl == null || tvl < s.minTvl) return `TVL ${tvl ?? "unknown"} below minTvl ${s.minTvl}`;
   if (s.maxTvl != null && tvl > s.maxTvl) return `TVL ${tvl} above maxTvl ${s.maxTvl}`;
   if (binStep == null || binStep < s.minBinStep) return `bin_step ${binStep ?? "unknown"} below minBinStep ${s.minBinStep}`;
@@ -193,6 +224,23 @@ function getRawPoolScreeningRejectReason(pool, s) {
   if (s.maxTokenAgeHours != null) {
     const minCreatedAt = Date.now() - s.maxTokenAgeHours * 3_600_000;
     if (createdAt == null || createdAt < minCreatedAt) return `token age above maxTokenAgeHours ${s.maxTokenAgeHours}`;
+  }
+
+  // 24h fee/active-TVL is the window percent (5 = 5% of active TVL), not an annualized APR.
+  // Must be strictly above the floor. Ranging = the 24h net move is not a hard trend.
+  const minFee24h = numeric(s.minFeeActiveTvl24h);
+  if (minFee24h != null && minFee24h > 0) {
+    const fee24h = numeric(pool?.fee_active_tvl_ratio_24h);
+    if (fee24h == null || fee24h <= minFee24h) {
+      return `24h fee/active-TVL ${fee24h ?? "unknown"}% is not above minFeeActiveTvl24h ${minFee24h}%`;
+    }
+  }
+  const maxAbsPriceChange24hPct = numeric(s.maxAbsPriceChange24hPct);
+  if (maxAbsPriceChange24hPct != null) {
+    const absChange = absolutePriceChangePct(pool?.pool_price_change_pct_24h, pool?.price_trend_24h);
+    if (absChange == null || absChange > maxAbsPriceChange24hPct) {
+      return `24h price change ${absChange == null ? "unknown" : `${absChange.toFixed(2)}%`} exceeds maxAbsPriceChange24hPct ${maxAbsPriceChange24hPct}%`;
+    }
   }
   return null;
 }
@@ -283,6 +331,46 @@ async function applyVolatilityTimeframe(rawPools, sourceTimeframe) {
     if (metrics.volume != null) pool.volume = metrics.volume;
   }
 
+  return rawPools;
+}
+
+async function attach24hQualification(rawPools, sourceTimeframe, screening) {
+  if (!Array.isArray(rawPools) || rawPools.length === 0) return rawPools;
+  if (!qualification24hEnabled(screening)) return rawPools;
+
+  if (sourceTimeframe === "24h") {
+    for (const pool of rawPools) {
+      if (pool) stamp24hMetrics(pool, pool);
+    }
+    return rawPools;
+  }
+
+  const addresses = [...new Set(rawPools.map((pool) => pool?.pool_address).filter(Boolean))];
+  const byAddress = new Map();
+  const CHUNK = 8;
+  for (let i = 0; i < addresses.length; i += CHUNK) {
+    const slice = addresses.slice(i, i + CHUNK);
+    const results = await Promise.allSettled(
+      slice.map((poolAddress) =>
+        fetchPoolDiscoveryDetail({ poolAddress, timeframe: "24h" })
+          .then((detail) => ({ poolAddress, detail }))
+      )
+    );
+    for (const result of results) {
+      if (result.status !== "fulfilled" || !result.value?.detail) continue;
+      byAddress.set(result.value.poolAddress, result.value.detail);
+    }
+  }
+
+  let attached = 0;
+  for (const pool of rawPools) {
+    if (!pool?.pool_address) continue;
+    const detail = byAddress.get(pool.pool_address);
+    if (!detail) continue;
+    stamp24hMetrics(pool, detail);
+    attached += 1;
+  }
+  log("screening", `24h qualification attached ${attached}/${addresses.length} pools`);
   return rawPools;
 }
 
@@ -443,12 +531,15 @@ export async function discoverPools({
     `base_token_market_cap>=${s.minMcap}`,
     `base_token_market_cap<=${s.maxMcap}`,
     `base_token_holders>=${s.minHolders}`,
-    `volume>=${s.minVolume}`,
+    numeric(s.minVolume) > 0 ? `volume>=${s.minVolume}` : null,
     `tvl>=${s.minTvl}`,
     s.maxTvl != null ? `tvl<=${s.maxTvl}` : null,
     `dlmm_bin_step>=${s.minBinStep}`,
     `dlmm_bin_step<=${s.maxBinStep}`,
-    `fee_active_tvl_ratio>=${s.minFeeActiveTvlRatio}`,
+    `fee_active_tvl_ratio>=${Math.max(
+      Number(s.minFeeActiveTvlRatio) || 0,
+      s.timeframe === "24h" ? (Number(s.minFeeActiveTvl24h) || 0) : 0,
+    )}`,
     `base_token_organic_score>=${s.minOrganic}`,
     `quote_token_organic_score>=${s.minQuoteOrganic}`,
     s.minTokenAgeHours != null ? `base_token_created_at<=${Date.now() - s.minTokenAgeHours * 3_600_000}` : null,
@@ -520,6 +611,11 @@ export async function discoverPools({
 
   rawPools = await applyVolatilityTimeframe(rawPools, s.timeframe);
   await enrichDiscordSignalLaunchpads(rawPools);
+  if (qualification24hEnabled(s)) {
+    const prelim = { ...s, minFeeActiveTvl24h: 0, maxAbsPriceChange24hPct: null };
+    const pending = rawPools.filter((pool) => !getRawPoolScreeningRejectReason(pool, prelim));
+    await attach24hQualification(pending, s.timeframe, s);
+  }
 
   const filteredExamples = [];
   const thresholdedRawPools = rawPools.filter((pool) => {
@@ -767,6 +863,8 @@ function condensePool(p) {
     fee_window: round(p.fee),
     volume_window: round(p.volume),
     fee_active_tvl_ratio: p.fee_active_tvl_ratio != null ? fix(p.fee_active_tvl_ratio, 4) : null,
+    fee_active_tvl_ratio_24h: p.fee_active_tvl_ratio_24h != null ? fix(p.fee_active_tvl_ratio_24h, 2) : null,
+    price_change_24h_pct: p.pool_price_change_pct_24h != null ? fix(p.pool_price_change_pct_24h, 1) : null,
     volatility: fix(p.volatility, 4),
     volatility_timeframe: p.volatility_timeframe || getVolatilityTimeframe(config.screening.timeframe),
 
