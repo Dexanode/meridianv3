@@ -15,32 +15,18 @@ import { getActiveStrategy } from "../strategy-library.js";
 
 export const EVIL_PANDA_PRESET = "evil_panda_bid_ask_flip";
 
-// Signals the screener does not fetch. Never treat these as a pass.
+// No GMGN field for these. Never treat a missing source as a pass.
+// wallet_tags_stat.renowned_wallets is a KOL holder count, not a celebrity-token flag.
 export const UNAVAILABLE_ANTIRUG_SIGNALS = [
-  {
-    id: "insider",
-    status: "skipped",
-    reason: "Jupiter audit and holder tags have no insider/sniper percentage",
-  },
-  {
-    id: "bundler",
-    status: "skipped",
-    reason: "holder payload has no bundler percentage (the CLI text mentions bundlers_pct_in_top_100, but it is not computed)",
-  },
-  {
-    id: "cto",
-    status: "skipped",
-    reason: "discovery token tags have no CTO flag",
-  },
   {
     id: "vamp",
     status: "skipped",
-    reason: "no vamp/copycat flag on the fetched token payload",
+    reason: "GMGN /v1/token/info has no vamp or copycat field",
   },
   {
     id: "celebrity",
     status: "skipped",
-    reason: "no celebrity flag on the fetched token payload",
+    reason: "GMGN exposes wallet_tags_stat.renowned_wallets (KOL holder count), not a celebrity-token flag. That count is not a gate.",
   },
   {
     id: "cumulative_meteora_lp_fees_sol",
@@ -77,6 +63,9 @@ export function evilPandaParams(strategy = config.strategy) {
     maxTotalBins: withFallback(strategy?.evilPandaMaxTotalBins, 140),
     minFeesSol: withFallback(strategy?.evilPandaMinFeesSol, 50),
     maxTop10Pct: withFallback(strategy?.evilPandaMaxTop10Pct, 30),
+    // GMGN volume ratios, not rescaled. 0 rejects any positive reading.
+    maxRatTraderRatio: withFallback(strategy?.evilPandaMaxRatTraderRatio, 0),
+    maxBundlerRatio: withFallback(strategy?.evilPandaMaxBundlerRatio, 0),
     maxPositions: withFallback(strategy?.evilPandaMaxPositions, 1),
     exitRsiAbove: withFallback(strategy?.evilPandaExitRsiAbove, 90),
     tokenMajorityPct: withFallback(strategy?.evilPandaTokenMajorityPct, 50),
@@ -107,11 +96,54 @@ export function screeningForActivePreset(screening = config.screening, strategy 
   };
 }
 
+function gmgnSkip(signalStatus, id, reason, reasons) {
+  signalStatus[id] = "skipped";
+  reasons.push(reason);
+}
+
+function applyGmgnAntiRug(gmgn, gates, reasons, signalStatus) {
+  if (!gmgn || gmgn.ok === false) {
+    const reason = gmgn?.reason || "GMGN anti-rug unavailable — skipped";
+    gmgnSkip(signalStatus, "insider", reason, reasons);
+    signalStatus.bundler = "skipped";
+    signalStatus.cto = "skipped";
+    return;
+  }
+
+  if (gmgn.rat_trader_ratio == null) {
+    gmgnSkip(signalStatus, "insider", "GMGN stat.top_rat_trader_percentage unavailable — skipped", reasons);
+  } else if (gmgn.rat_trader_ratio > gates.maxRatTraderRatio) {
+    signalStatus.insider = "fail";
+    reasons.push(`GMGN stat.top_rat_trader_percentage ${gmgn.rat_trader_ratio} exceeds ${gates.maxRatTraderRatio}`);
+  } else {
+    signalStatus.insider = "pass";
+  }
+
+  if (gmgn.bundler_ratio == null) {
+    gmgnSkip(signalStatus, "bundler", "GMGN stat.top_bundler_trader_percentage unavailable — skipped", reasons);
+  } else if (gmgn.bundler_ratio > gates.maxBundlerRatio) {
+    signalStatus.bundler = "fail";
+    reasons.push(`GMGN stat.top_bundler_trader_percentage ${gmgn.bundler_ratio} exceeds ${gates.maxBundlerRatio}`);
+  } else {
+    signalStatus.bundler = "pass";
+  }
+
+  if (gmgn.cto_flag !== 0 && gmgn.cto_flag !== 1) {
+    gmgnSkip(signalStatus, "cto", "GMGN dev.cto_flag unavailable — skipped", reasons);
+  } else if (gmgn.cto_flag === 1) {
+    signalStatus.cto = "fail";
+    reasons.push("GMGN dev.cto_flag is 1 (community takeover)");
+  } else {
+    signalStatus.cto = "pass";
+  }
+}
+
 export function evaluateEvilPandaGates(candidate, gates = evilPandaParams(), options = {}) {
   const {
     checkTop10 = true,
     checkFees = true,
     checkBots = false,
+    checkGmgn = false,
   } = options;
   const reasons = [];
 
@@ -146,6 +178,12 @@ export function evaluateEvilPandaGates(candidate, gates = evilPandaParams(), opt
   }
 
   const signalStatus = Object.fromEntries(UNAVAILABLE_ANTIRUG_SIGNALS.map((signal) => [signal.id, "skipped"]));
+  if (checkGmgn) applyGmgnAntiRug(candidate?.gmgn, gates, reasons, signalStatus);
+  else {
+    signalStatus.insider = "not_checked";
+    signalStatus.bundler = "not_checked";
+    signalStatus.cto = "not_checked";
+  }
   return {
     pass: reasons.length === 0,
     reasons,

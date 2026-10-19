@@ -30,6 +30,7 @@ import { getActiveStrategy } from "./strategy-library.js";
 import { recordPositionSnapshot, recallForPool, addPoolNote } from "./pool-memory.js";
 import { checkSmartWalletsOnPool } from "./smart-wallets.js";
 import { getTokenNarrative, getTokenInfo } from "./tools/token.js";
+import { getGmgnAntiRug } from "./tools/gmgn.js";
 import { confirmEvilPandaExit } from "./tools/chart-indicators.js";
 import {
   effectiveMaxPositions,
@@ -485,7 +486,7 @@ export async function runScreeningCycle({ silent = false } = {}) {
     const pandaOn = isEvilPandaActive();
     const strategyBlock = `DEPLOY STRATEGY: ${deployStrategy} (from config) | bins_above: 0 (FIXED — never change) | deposit: SOL only (amount_y, amount_x=0)`
       + (activeStrategy ? `\nSTRATEGY CONTEXT: ${activeStrategy.name} — entry: ${activeStrategy.entry?.condition || "n/a"} | exit: ${activeStrategy.exit?.notes || "n/a"} | best for: ${activeStrategy.best_for}` : "")
-      + (pandaOn ? `\nEVIL PANDA SOL ENTRY: ignore the volatility bins formula. deploy_position forces bid_ask, downside_pct=${config.strategy.evilPandaDownsidePct}, bins_above=0, amount_x=0, and caps total bins at ${config.strategy.evilPandaMaxTotalBins}. The 24h ranging cap is off while this preset is on. One position at a time.` : "");
+      + (pandaOn ? `\nEVIL PANDA SOL ENTRY: ignore the volatility bins formula. deploy_position forces bid_ask, downside_pct=${config.strategy.evilPandaDownsidePct}, bins_above=0, amount_x=0, and caps total bins at ${config.strategy.evilPandaMaxTotalBins}. The 24h ranging cap is off while this preset is on. One position at a time. GMGN rat-trader, bundler, and CTO gates already dropped failures; a missing GMGN field is a skip.` : "");
 
     // Fetch top candidates, then recon each sequentially with a small delay to avoid 429s
     const topCandidates = await getTopCandidates({ limit: 10 }).catch(() => null);
@@ -512,39 +513,44 @@ export async function runScreeningCycle({ silent = false } = {}) {
 
     // Hard filters after token recon — block launchpads and excessive Jupiter bot holders
     const filteredOut = [];
-    const passing = allCandidates.filter(({ pool, ti }) => {
+    const passing = [];
+    for (const row of allCandidates) {
+      const { pool, ti } = row;
       const launchpad = ti?.launchpad ?? null;
       if (launchpad && config.screening.allowedLaunchpads?.length > 0 && !config.screening.allowedLaunchpads.includes(launchpad)) {
         log("screening", `Skipping ${pool.name} — launchpad ${launchpad} not in allow-list`);
         filteredOut.push({ name: pool.name, reason: `launchpad ${launchpad} not in allow-list` });
-        return false;
+        continue;
       }
       if (launchpad && config.screening.blockedLaunchpads.includes(launchpad)) {
         log("screening", `Skipping ${pool.name} — blocked launchpad (${launchpad})`);
         filteredOut.push({ name: pool.name, reason: `blocked launchpad (${launchpad})` });
-        return false;
+        continue;
       }
       const botPct = ti?.audit?.bot_holders_pct;
       const maxBotHoldersPct = config.screening.maxBotHoldersPct;
       if (isEvilPandaActive()) {
+        const mint = pool.base?.mint || ti?.mint || null;
+        const gmgn = await getGmgnAntiRug(mint);
         const gate = evaluateEvilPandaGates({
           top_holders_pct: ti?.audit?.top_holders_pct ?? pool.top_holders_pct,
           global_fees_sol: ti?.global_fees_sol,
           bot_holders_pct: botPct,
-        }, evilPandaParams(), { checkTop10: true, checkFees: true, checkBots: true });
+          gmgn,
+        }, evilPandaParams(), { checkTop10: true, checkFees: true, checkBots: true, checkGmgn: true });
         if (!gate.pass) {
           const reason = gate.reasons[0];
           log("screening", `Evil panda filter: dropped ${pool.name} — ${reason}`);
           filteredOut.push({ name: pool.name, reason });
-          return false;
+          continue;
         }
       } else if (botPct != null && maxBotHoldersPct != null && botPct > maxBotHoldersPct) {
         log("screening", `Bot-holder filter: dropped ${pool.name} — bots ${botPct}% > ${maxBotHoldersPct}%`);
         filteredOut.push({ name: pool.name, reason: `bot holders ${botPct}% > ${maxBotHoldersPct}%` });
-        return false;
+        continue;
       }
-      return true;
-    });
+      passing.push(row);
+    }
 
     if (passing.length === 0) {
       const combined = filteredOut.length > 0 ? filteredOut : earlyFilteredExamples;

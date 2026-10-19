@@ -23,6 +23,8 @@
   "evilPandaMaxTotalBins": 140,
   "evilPandaMinFeesSol": 50,
   "evilPandaMaxTop10Pct": 30,
+  "evilPandaMaxRatTraderRatio": 0,
+  "evilPandaMaxBundlerRatio": 0,
   "evilPandaMaxPositions": 1,
   "evilPandaExitRsiAbove": 90,
   "evilPandaTokenMajorityPct": 50,

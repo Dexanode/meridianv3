@@ -22,6 +22,7 @@ import { addSmartWallet, removeSmartWallet, listSmartWallets, checkSmartWalletsO
 import { getTokenInfo, getTokenHolders, getTokenNarrative } from "./token.js";
 import { config, reloadScreeningThresholds, MIN_SAFE_BINS_BELOW } from "../config.js";
 import { effectiveMaxPositions, evaluateEvilPandaGates, evilPandaParams, isEvilPandaActive } from "./evil-panda.js";
+import { getGmgnAntiRug } from "./gmgn.js";
 import { getRecentDecisions } from "../decision-log.js";
 import fs from "fs";
 import { execSync, spawn } from "child_process";
@@ -169,9 +170,17 @@ async function validateDeployPoolThresholds(args) {
     const gate = evaluateEvilPandaGates(
       { top_holders_pct: detail?.token_x?.top_holders_pct },
       evilPandaParams(),
-      { checkTop10: true, checkFees: false, checkBots: false },
+      { checkTop10: true, checkFees: false, checkBots: false, checkGmgn: false },
     );
     if (!gate.pass) return { pass: false, reason: gate.reasons[0] };
+    const mint = detail?.token_x?.address || detail?.base_token_address || null;
+    const gmgn = await getGmgnAntiRug(mint);
+    const gmgnGate = evaluateEvilPandaGates(
+      { gmgn },
+      evilPandaParams(),
+      { checkTop10: false, checkFees: false, checkBots: false, checkGmgn: true },
+    );
+    if (!gmgnGate.pass) return { pass: false, reason: gmgnGate.reasons[0] };
   }
 
   const baseMint = detail?.token_x?.address || detail?.base_token_address || null;
@@ -446,6 +455,8 @@ const toolMap = {
       evilPandaMaxTotalBins: ["strategy", "evilPandaMaxTotalBins"],
       evilPandaMinFeesSol: ["strategy", "evilPandaMinFeesSol"],
       evilPandaMaxTop10Pct: ["strategy", "evilPandaMaxTop10Pct"],
+      evilPandaMaxRatTraderRatio: ["strategy", "evilPandaMaxRatTraderRatio"],
+      evilPandaMaxBundlerRatio: ["strategy", "evilPandaMaxBundlerRatio"],
       evilPandaMaxPositions: ["strategy", "evilPandaMaxPositions"],
       evilPandaExitRsiAbove: ["strategy", "evilPandaExitRsiAbove"],
       evilPandaTokenMajorityPct: ["strategy", "evilPandaTokenMajorityPct"],

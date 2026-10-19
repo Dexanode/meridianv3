@@ -96,7 +96,7 @@ const DEFAULT_STRATEGIES = {
     author: "meridian",
     lp_strategy: "bid_ask",
     token_criteria: {
-      notes: "Opt-in. Also set strategyPreset to evil_panda_bid_ask_flip (or set this strategy active). Age >= 3 days, top10 <= 30%, SOL fee total > 50, bot holders within maxBotHoldersPct. Insider, bundler, CTO, vamp, and celebrity are not available on the fetched payloads and are skipped, not treated as clean. Prefers base fee ~5-10% and bin step ~125.",
+      notes: "Opt-in. Also set strategyPreset to evil_panda_bid_ask_flip (or set this strategy active). Age >= 3 days, top10 <= 30%, SOL fee total > 50, bot holders within maxBotHoldersPct. GMGN stat.top_rat_trader_percentage and stat.top_bundler_trader_percentage must be within their caps (default 0) and dev.cto_flag must be 0. Missing GMGN data skips the token. Vamp and celebrity have no GMGN field and stay skipped. Prefers base fee ~5-10% and bin step ~125.",
     },
     entry: {
       condition: "SOL-only bid-ask below the active bin, about -80% to -90% (default downside 85%, capped at 140 bins)",

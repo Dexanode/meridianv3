@@ -93,15 +93,95 @@ function num(value) {
   return Number.isFinite(n) ? n : null;
 }
 
+function unwrapTokenInfo(payload) {
+  const info = payload?.data?.data || payload?.data || payload;
+  if (!info || typeof info !== "object" || Array.isArray(info)) return null;
+  return info;
+}
+
+// Short cache so the fee lookup and the anti-rug lookup share one /v1/token/info call.
+const tokenInfoCache = new Map();
+const TOKEN_INFO_TTL_MS = 60_000;
+
+async function loadGmgnTokenInfo(mint) {
+  const key = String(mint);
+  const hit = tokenInfoCache.get(key);
+  if (hit && Date.now() - hit.at < TOKEN_INFO_TTL_MS) return hit.info;
+  const payload = await gmgnFetch("/v1/token/info", { params: { chain: "sol", address: mint } });
+  const info = unwrapTokenInfo(payload);
+  if (info) tokenInfoCache.set(key, { at: Date.now(), info });
+  return info;
+}
+
+// Fields GMGN documents on GET /v1/token/info. Rat trader is their insider label.
+// renowned_wallets is a KOL holder count, not a celebrity-token flag, and is not gated.
+export const GMGN_ANTIRUG_FIELDS = {
+  insider: "stat.top_rat_trader_percentage",
+  bundler: "stat.top_bundler_trader_percentage",
+  cto: "dev.cto_flag",
+  kol_holder_count: "wallet_tags_stat.renowned_wallets",
+};
+
+function ratioOrNull(value) {
+  const n = num(value);
+  if (n == null || n < 0) return null;
+  return n;
+}
+
+/**
+ * Pull the anti-rug numbers /v1/token/info actually returns.
+ * Rat-trader and bundler values are left on GMGN's scale (documented as a
+ * volume ratio, same family as the 0–1 rate fields). They are not rescaled.
+ * cto_flag is 1 or 0. renowned_wallets is observed and not a reject signal.
+ */
+export function parseGmgnAntiRug(info) {
+  const stat = info?.stat && typeof info.stat === "object" ? info.stat : null;
+  const dev = info?.dev && typeof info.dev === "object" ? info.dev : null;
+  const tags = info?.wallet_tags_stat && typeof info.wallet_tags_stat === "object" ? info.wallet_tags_stat : null;
+  const cto = ratioOrNull(dev?.cto_flag);
+  return {
+    rat_trader_ratio: ratioOrNull(stat?.top_rat_trader_percentage),
+    bundler_ratio: ratioOrNull(stat?.top_bundler_trader_percentage),
+    cto_flag: cto === 0 || cto === 1 ? cto : null,
+    renowned_wallets: ratioOrNull(tags?.renowned_wallets),
+  };
+}
+
+function antiRugMiss(reason) {
+  return { ok: false, reason };
+}
+
+/**
+ * Evil Panda anti-rug fetch. Missing key, missing payload, and thrown errors
+ * all return ok:false so the caller can skip the token. This does not fall
+ * back the way getGmgnTokenFees does.
+ * Pass fetchTokenInfo in tests; that path never calls the network.
+ */
+export async function getGmgnAntiRug(mint, { fetchTokenInfo, hasKey } = {}) {
+  if (!mint) return antiRugMiss("GMGN anti-rug unavailable — skipped");
+  const keyPresent = hasKey ?? hasGmgnApiKey();
+  if (!fetchTokenInfo && !keyPresent) return antiRugMiss("GMGN anti-rug unavailable — skipped");
+  try {
+    const payload = fetchTokenInfo
+      ? await fetchTokenInfo(mint)
+      : await loadGmgnTokenInfo(mint);
+    const info = fetchTokenInfo ? unwrapTokenInfo(payload) : payload;
+    if (!info) return antiRugMiss("GMGN anti-rug unavailable — skipped");
+    return { ok: true, ...parseGmgnAntiRug(info) };
+  } catch (error) {
+    log("gmgn", `anti-rug lookup failed for ${String(mint).slice(0, 8)}: ${error.message}`);
+    return antiRugMiss("GMGN anti-rug call failed — skipped");
+  }
+}
+
 // ─── Token fees (SOL) for the minTokenFeesSol gate ──────────────
 // Returns { total_fee, trade_fee } in SOL, or null on missing key / error
 // so callers can fall back to Jupiter's fee figure.
 export async function getGmgnTokenFees(mint) {
   if (!mint || !hasGmgnApiKey()) return null;
   try {
-    const payload = await gmgnFetch("/v1/token/info", { params: { chain: "sol", address: mint } });
-    const info = payload?.data?.data || payload?.data || payload;
-    if (!info || typeof info !== "object") return null;
+    const info = await loadGmgnTokenInfo(mint);
+    if (!info) return null;
     return {
       total_fee: num(info.total_fee),
       trade_fee: num(info.trade_fee),

@@ -152,6 +152,9 @@ export const config = {
     evilPandaMaxTotalBins: numericConfig(u.evilPandaMaxTotalBins) ?? 140,
     evilPandaMinFeesSol: numericConfig(u.evilPandaMinFeesSol) ?? 50,
     evilPandaMaxTop10Pct: numericConfig(u.evilPandaMaxTop10Pct) ?? 30,
+    // Raw GMGN volume ratios. 0 rejects any positive rat-trader or bundler reading.
+    evilPandaMaxRatTraderRatio: numericConfig(u.evilPandaMaxRatTraderRatio) ?? 0,
+    evilPandaMaxBundlerRatio: numericConfig(u.evilPandaMaxBundlerRatio) ?? 0,
     evilPandaMaxPositions: numericConfig(u.evilPandaMaxPositions) ?? 1,
     evilPandaExitRsiAbove: numericConfig(u.evilPandaExitRsiAbove) ?? 90,
     evilPandaTokenMajorityPct: numericConfig(u.evilPandaTokenMajorityPct) ?? 50,

@@ -19,6 +19,7 @@ import {
   planEvilPandaManagement,
   screeningForActivePreset,
 } from "../tools/evil-panda.js";
+import { GMGN_ANTIRUG_FIELDS, getGmgnAntiRug, parseGmgnAntiRug } from "../tools/gmgn.js";
 
 const failures = [];
 function check(name, cond) {
@@ -52,6 +53,8 @@ check("maxTop10Pct default stays 60", config.screening.maxTop10Pct === 60);
 check("preset downside is 85 and unused while off", config.strategy.evilPandaDownsidePct === 85);
 check("preset fee floor is 50", config.strategy.evilPandaMinFeesSol === 50);
 check("preset top10 is 30", config.strategy.evilPandaMaxTop10Pct === 30);
+check("preset rat-trader cap is 0", config.strategy.evilPandaMaxRatTraderRatio === 0);
+check("preset bundler cap is 0", config.strategy.evilPandaMaxBundlerRatio === 0);
 check("preset max positions is 1", config.strategy.evilPandaMaxPositions === 1);
 check("preset bin cap is 140", config.strategy.evilPandaMaxTotalBins === 140);
 check("preset exit RSI is 90", config.strategy.evilPandaExitRsiAbove === 90);
@@ -61,6 +64,8 @@ check("example strategyPreset is null", example.strategyPreset == null);
 check("example still has the 15% cap", example.maxAbsPriceChange24hPct === 15);
 check("example evilPandaMinFeesSol is 50", example.evilPandaMinFeesSol === 50);
 check("example evilPandaMaxTop10Pct is 30", example.evilPandaMaxTop10Pct === 30);
+check("example rat-trader cap is 0", example.evilPandaMaxRatTraderRatio === 0);
+check("example bundler cap is 0", example.evilPandaMaxBundlerRatio === 0);
 check("example evilPandaMaxPositions is 1", example.evilPandaMaxPositions === 1);
 check("example maxPositions stays 3", example.maxPositions === 3);
 
@@ -72,6 +77,8 @@ for (const key of [
   "evilPandaMaxTotalBins",
   "evilPandaMinFeesSol",
   "evilPandaMaxTop10Pct",
+  "evilPandaMaxRatTraderRatio",
+  "evilPandaMaxBundlerRatio",
   "evilPandaMaxPositions",
   "evilPandaExitRsiAbove",
   "evilPandaTokenMajorityPct",
@@ -83,6 +90,8 @@ const gates = {
   maxTop10Pct: 30,
   minFeesSol: 50,
   maxBotHoldersPct: 30,
+  maxRatTraderRatio: 0,
+  maxBundlerRatio: 0,
 };
 const clean = { top_holders_pct: 30, global_fees_sol: 50.01, bot_holders_pct: 30 };
 const passed = evaluateEvilPandaGates(clean, gates, { checkTop10: true, checkFees: true, checkBots: true });
@@ -100,7 +109,80 @@ check("bot holders are not required before recon", evaluateEvilPandaGates({ top_
 for (const signal of UNAVAILABLE_ANTIRUG_SIGNALS) {
   check(`${signal.id} is skipped, not passed`, passed.signalStatus[signal.id] === "skipped");
 }
-check("unavailable list does not include a fake pass", passed.unavailable.includes("insider") && passed.unavailable.includes("bundler") && passed.unavailable.includes("cto") && passed.unavailable.includes("vamp") && passed.unavailable.includes("celebrity") && passed.unavailable.includes("cumulative_meteora_lp_fees_sol"));
+check("vamp and celebrity still have no source", passed.unavailable.includes("vamp") && passed.unavailable.includes("celebrity") && !passed.unavailable.includes("insider") && !passed.unavailable.includes("bundler") && !passed.unavailable.includes("cto"));
+check("GMGN gates stay off unless screening asks for them", passed.signalStatus.insider === "not_checked" && passed.pass === true);
+
+const cleanGmgn = {
+  ok: true,
+  rat_trader_ratio: 0,
+  bundler_ratio: 0,
+  cto_flag: 0,
+  renowned_wallets: 4,
+};
+const gmgnOptions = { checkTop10: true, checkFees: true, checkBots: true, checkGmgn: true };
+const gmgnPass = evaluateEvilPandaGates({ ...clean, gmgn: cleanGmgn }, gates, gmgnOptions);
+check("clean GMGN ratios and cto_flag 0 pass", gmgnPass.pass === true && gmgnPass.signalStatus.insider === "pass" && gmgnPass.signalStatus.bundler === "pass" && gmgnPass.signalStatus.cto === "pass");
+check("KOL holder count does not clear the celebrity skip", gmgnPass.signalStatus.celebrity === "skipped" && gmgnPass.signalStatus.vamp === "skipped");
+check("rat trader above 0 fails", evaluateEvilPandaGates({ ...clean, gmgn: { ...cleanGmgn, rat_trader_ratio: 0.2 } }, gates, gmgnOptions).signalStatus.insider === "fail");
+check("bundler above 0 fails", evaluateEvilPandaGates({ ...clean, gmgn: { ...cleanGmgn, bundler_ratio: 0.15 } }, gates, gmgnOptions).signalStatus.bundler === "fail");
+check("cto_flag 1 fails", evaluateEvilPandaGates({ ...clean, gmgn: { ...cleanGmgn, cto_flag: 1 } }, gates, gmgnOptions).reasons.join(" ").includes("cto_flag"));
+check("missing rat-trader field skips", evaluateEvilPandaGates({ ...clean, gmgn: { ...cleanGmgn, rat_trader_ratio: null } }, gates, gmgnOptions).reasons.join(" ").includes("top_rat_trader_percentage unavailable"));
+check("missing GMGN object skips", evaluateEvilPandaGates(clean, gates, gmgnOptions).reasons.join(" ").includes("unavailable"));
+
+function gmgnEnvelope({ rat = 0, bundler = 0, cto = 0, renowned = 3 } = {}) {
+  return {
+    data: {
+      data: {
+        stat: { top_rat_trader_percentage: rat, top_bundler_trader_percentage: bundler },
+        dev: { cto_flag: cto },
+        wallet_tags_stat: { renowned_wallets: renowned },
+      },
+    },
+  };
+}
+
+check("parser reads the documented GMGN fields", (() => {
+  const parsed = parseGmgnAntiRug(gmgnEnvelope({ rat: 0.05, bundler: 0.1, cto: 1, renowned: 2 }).data.data);
+  return parsed.rat_trader_ratio === 0.05
+    && parsed.bundler_ratio === 0.1
+    && parsed.cto_flag === 1
+    && parsed.renowned_wallets === 2
+    && GMGN_ANTIRUG_FIELDS.insider === "stat.top_rat_trader_percentage"
+    && GMGN_ANTIRUG_FIELDS.bundler === "stat.top_bundler_trader_percentage"
+    && GMGN_ANTIRUG_FIELDS.cto === "dev.cto_flag";
+})());
+
+const mockedPass = await getGmgnAntiRug("MintMock111", { fetchTokenInfo: async () => gmgnEnvelope() });
+const mockedGate = evaluateEvilPandaGates({ ...clean, gmgn: mockedPass }, gates, gmgnOptions);
+check("mocked GMGN token info passes the gates", mockedPass.ok === true && mockedGate.pass === true);
+
+const mockedMissing = await getGmgnAntiRug("MintMock111", {
+  fetchTokenInfo: async () => ({ data: { data: { symbol: "NOFIELDS" } } }),
+});
+const missingGate = evaluateEvilPandaGates({ ...clean, gmgn: mockedMissing }, gates, gmgnOptions);
+check("mocked GMGN payload with missing fields skips", mockedMissing.ok === true && missingGate.pass === false && missingGate.reasons.join(" ").includes("unavailable") && missingGate.signalStatus.insider === "skipped" && missingGate.signalStatus.cto === "skipped");
+
+const mockedNull = await getGmgnAntiRug("MintMock111", { fetchTokenInfo: async () => null });
+const nullGate = evaluateEvilPandaGates({ ...clean, gmgn: mockedNull }, gates, gmgnOptions);
+check("mocked empty GMGN response skips", mockedNull.ok === false && mockedNull.reason.includes("unavailable") && nullGate.pass === false);
+
+const mockedThrow = await getGmgnAntiRug("MintMock111", {
+  fetchTokenInfo: async () => { throw new Error("socket down"); },
+});
+const throwGate = evaluateEvilPandaGates({ ...clean, gmgn: mockedThrow }, gates, gmgnOptions);
+check("mocked GMGN call failure skips", mockedThrow.ok === false && mockedThrow.reason.includes("call failed") && throwGate.pass === false && throwGate.signalStatus.insider === "skipped" && throwGate.signalStatus.bundler === "skipped");
+
+const noKey = await getGmgnAntiRug("MintMock111", { hasKey: false });
+check("missing GMGN key skips without a network call", noKey.ok === false && noKey.reason.includes("unavailable"));
+
+const envExample = fs.readFileSync(new URL("../.env.example", import.meta.url), "utf8");
+const readme = fs.readFileSync(new URL("../README.md", import.meta.url), "utf8");
+check("example env documents GMGN_API_KEY", envExample.includes("GMGN_API_KEY="));
+check("README documents GMGN_API_KEY", readme.includes("GMGN_API_KEY"));
+const indexSrc = fs.readFileSync(new URL("../index.js", import.meta.url), "utf8");
+check("screening fetches GMGN only for the preset", indexSrc.includes("getGmgnAntiRug") && indexSrc.includes("checkGmgn: true"));
+const dlmmSrc = fs.readFileSync(new URL("../tools/dlmm.js", import.meta.url), "utf8");
+check("bin cap and uninitialized-array refusal stay", dlmmSrc.includes("evilPandaMaxTotalBins ?? 140") && dlmmSrc.includes("assertRangeDoesNotRequireBinArrayInitialization"));
 
 check("discovery top10 gate is off with the preset", evilPandaDiscoveryReject({ token_x: { top_holders_pct: 90 } }, offStrategy, null) == null);
 check("discovery rejects top10 above 30 when the preset is on", String(evilPandaDiscoveryReject({ token_x: { top_holders_pct: 31 } }, onStrategy, null)).includes("top10"));
