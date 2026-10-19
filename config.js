@@ -144,6 +144,23 @@ export const config = {
     minBinsBelow: strategyMinBinsBelow,
     maxBinsBelow: strategyMaxBinsBelow,
     defaultBinsBelow: strategyDefaultBinsBelow,
+    // null = current screener/manager. "evil_panda_bid_ask_flip" opts into that preset.
+    // The evilPanda* numbers are ignored until the preset is on.
+    preset: u.strategyPreset ?? null,
+    evilPandaDownsidePct: numericConfig(u.evilPandaDownsidePct) ?? 85,
+    evilPandaUpsidePct: numericConfig(u.evilPandaUpsidePct) ?? 85,
+    evilPandaMaxTotalBins: numericConfig(u.evilPandaMaxTotalBins) ?? 140,
+    evilPandaMinFeesSol: numericConfig(u.evilPandaMinFeesSol) ?? 50,
+    evilPandaMaxTop10Pct: numericConfig(u.evilPandaMaxTop10Pct) ?? 30,
+    // 0–100 holding percentages from Jupiter / SolanaTracker. Unused while the preset is off.
+    evilPandaMaxBundlerPct: numericConfig(u.evilPandaMaxBundlerPct) ?? 10,
+    evilPandaMaxInsiderPct: numericConfig(u.evilPandaMaxInsiderPct) ?? 10,
+    evilPandaMaxSniperPct: numericConfig(u.evilPandaMaxSniperPct) ?? 10,
+    evilPandaMaxDevPct: numericConfig(u.evilPandaMaxDevPct) ?? 5,
+    evilPandaMaxDevMints: numericConfig(u.evilPandaMaxDevMints) ?? 5,
+    evilPandaMaxPositions: numericConfig(u.evilPandaMaxPositions) ?? 1,
+    evilPandaExitRsiAbove: numericConfig(u.evilPandaExitRsiAbove) ?? 90,
+    evilPandaTokenMajorityPct: numericConfig(u.evilPandaTokenMajorityPct) ?? 50,
   },
 
   // ─── Scheduling ─────────────────────────

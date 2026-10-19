@@ -93,15 +93,34 @@ function num(value) {
   return Number.isFinite(n) ? n : null;
 }
 
+function unwrapTokenInfo(payload) {
+  const info = payload?.data?.data || payload?.data || payload;
+  if (!info || typeof info !== "object" || Array.isArray(info)) return null;
+  return info;
+}
+
+// Short cache so repeated fee lookups share one /v1/token/info call.
+const tokenInfoCache = new Map();
+const TOKEN_INFO_TTL_MS = 60_000;
+
+async function loadGmgnTokenInfo(mint) {
+  const key = String(mint);
+  const hit = tokenInfoCache.get(key);
+  if (hit && Date.now() - hit.at < TOKEN_INFO_TTL_MS) return hit.info;
+  const payload = await gmgnFetch("/v1/token/info", { params: { chain: "sol", address: mint } });
+  const info = unwrapTokenInfo(payload);
+  if (info) tokenInfoCache.set(key, { at: Date.now(), info });
+  return info;
+}
+
 // ─── Token fees (SOL) for the minTokenFeesSol gate ──────────────
 // Returns { total_fee, trade_fee } in SOL, or null on missing key / error
 // so callers can fall back to Jupiter's fee figure.
 export async function getGmgnTokenFees(mint) {
   if (!mint || !hasGmgnApiKey()) return null;
   try {
-    const payload = await gmgnFetch("/v1/token/info", { params: { chain: "sol", address: mint } });
-    const info = payload?.data?.data || payload?.data || payload;
-    if (!info || typeof info !== "object") return null;
+    const info = await loadGmgnTokenInfo(mint);
+    if (!info) return null;
     return {
       total_fee: num(info.total_fee),
       trade_fee: num(info.trade_fee),

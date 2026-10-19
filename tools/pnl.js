@@ -235,6 +235,11 @@ function buildPosition(f, prices, solUsd, meteora, solMode) {
     age_minutes:        ageMinutes,
     minutes_out_of_range: minutesOutOfRange(f.position),
     instruction:        tracked?.instruction ?? null,
+    leg:                tracked?.leg ?? null,
+    token_amount:       xHuman,
+    sol_amount:         yHuman,
+    token_value_usd:    round(xHuman * priceX),
+    sol_value_usd:      round(yHuman * (solUsd ?? 0)),
   };
 }
 
