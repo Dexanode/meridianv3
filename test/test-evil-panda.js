@@ -19,7 +19,11 @@ import {
   planEvilPandaManagement,
   screeningForActivePreset,
 } from "../tools/evil-panda.js";
-import { GMGN_ANTIRUG_FIELDS, getGmgnAntiRug, parseGmgnAntiRug } from "../tools/gmgn.js";
+import { parseJupiterAssetAudit, batchJupiterAudits } from "../tools/token.js";
+import { getSolanaTrackerRisk } from "../tools/solanatracker.js";
+import { getDexScreenerCto } from "../tools/dexscreener.js";
+import { runEvilPandaAntiRug } from "../tools/evil-panda-audit.js";
+import { evaluateJupiterPreset, evaluateTrackerPreset, evaluateCtoPreset } from "../tools/evil-panda.js";
 
 const failures = [];
 function check(name, cond) {
@@ -53,8 +57,11 @@ check("maxTop10Pct default stays 60", config.screening.maxTop10Pct === 60);
 check("preset downside is 85 and unused while off", config.strategy.evilPandaDownsidePct === 85);
 check("preset fee floor is 50", config.strategy.evilPandaMinFeesSol === 50);
 check("preset top10 is 30", config.strategy.evilPandaMaxTop10Pct === 30);
-check("preset rat-trader cap is 0", config.strategy.evilPandaMaxRatTraderRatio === 0);
-check("preset bundler cap is 0", config.strategy.evilPandaMaxBundlerRatio === 0);
+check("preset bundler cap is 10", config.strategy.evilPandaMaxBundlerPct === 10);
+check("preset insider cap is 10", config.strategy.evilPandaMaxInsiderPct === 10);
+check("preset sniper cap is 10", config.strategy.evilPandaMaxSniperPct === 10);
+check("preset dev cap is 5", config.strategy.evilPandaMaxDevPct === 5);
+check("preset dev mint cap is 5", config.strategy.evilPandaMaxDevMints === 5);
 check("preset max positions is 1", config.strategy.evilPandaMaxPositions === 1);
 check("preset bin cap is 140", config.strategy.evilPandaMaxTotalBins === 140);
 check("preset exit RSI is 90", config.strategy.evilPandaExitRsiAbove === 90);
@@ -64,8 +71,11 @@ check("example strategyPreset is null", example.strategyPreset == null);
 check("example still has the 15% cap", example.maxAbsPriceChange24hPct === 15);
 check("example evilPandaMinFeesSol is 50", example.evilPandaMinFeesSol === 50);
 check("example evilPandaMaxTop10Pct is 30", example.evilPandaMaxTop10Pct === 30);
-check("example rat-trader cap is 0", example.evilPandaMaxRatTraderRatio === 0);
-check("example bundler cap is 0", example.evilPandaMaxBundlerRatio === 0);
+check("example bundler cap is 10", example.evilPandaMaxBundlerPct === 10);
+check("example insider cap is 10", example.evilPandaMaxInsiderPct === 10);
+check("example sniper cap is 10", example.evilPandaMaxSniperPct === 10);
+check("example dev cap is 5", example.evilPandaMaxDevPct === 5);
+check("example dev mint cap is 5", example.evilPandaMaxDevMints === 5);
 check("example evilPandaMaxPositions is 1", example.evilPandaMaxPositions === 1);
 check("example maxPositions stays 3", example.maxPositions === 3);
 
@@ -77,8 +87,11 @@ for (const key of [
   "evilPandaMaxTotalBins",
   "evilPandaMinFeesSol",
   "evilPandaMaxTop10Pct",
-  "evilPandaMaxRatTraderRatio",
-  "evilPandaMaxBundlerRatio",
+  "evilPandaMaxBundlerPct",
+  "evilPandaMaxInsiderPct",
+  "evilPandaMaxSniperPct",
+  "evilPandaMaxDevPct",
+  "evilPandaMaxDevMints",
   "evilPandaMaxPositions",
   "evilPandaExitRsiAbove",
   "evilPandaTokenMajorityPct",
@@ -90,8 +103,11 @@ const gates = {
   maxTop10Pct: 30,
   minFeesSol: 50,
   maxBotHoldersPct: 30,
-  maxRatTraderRatio: 0,
-  maxBundlerRatio: 0,
+  maxBundlerPct: 10,
+  maxInsiderPct: 10,
+  maxSniperPct: 10,
+  maxDevPct: 5,
+  maxDevMints: 5,
 };
 const clean = { top_holders_pct: 30, global_fees_sol: 50.01, bot_holders_pct: 30 };
 const passed = evaluateEvilPandaGates(clean, gates, { checkTop10: true, checkFees: true, checkBots: true });
@@ -110,77 +126,177 @@ for (const signal of UNAVAILABLE_ANTIRUG_SIGNALS) {
   check(`${signal.id} is skipped, not passed`, passed.signalStatus[signal.id] === "skipped");
 }
 check("vamp and celebrity still have no source", passed.unavailable.includes("vamp") && passed.unavailable.includes("celebrity") && !passed.unavailable.includes("insider") && !passed.unavailable.includes("bundler") && !passed.unavailable.includes("cto"));
-check("GMGN gates stay off unless screening asks for them", passed.signalStatus.insider === "not_checked" && passed.pass === true);
+check("free anti-rug stays unchecked until recon asks", passed.signalStatus.insider === "not_checked" && passed.signalStatus.cto === "not_checked" && passed.pass === true);
 
-const cleanGmgn = {
-  ok: true,
-  rat_trader_ratio: 0,
-  bundler_ratio: 0,
-  cto_flag: 0,
-  renowned_wallets: 4,
+const jupBase = {
+  jupiter_ok: true,
+  top_holders_pct: 20,
+  bot_holders_pct: 10,
+  dev_pct: 2,
+  dev_mints: 1,
+  bundler_pct: 4,
+  bundler_stats_present: true,
+  global_fees_sol: 51,
 };
-const gmgnOptions = { checkTop10: true, checkFees: true, checkBots: true, checkGmgn: true };
-const gmgnPass = evaluateEvilPandaGates({ ...clean, gmgn: cleanGmgn }, gates, gmgnOptions);
-check("clean GMGN ratios and cto_flag 0 pass", gmgnPass.pass === true && gmgnPass.signalStatus.insider === "pass" && gmgnPass.signalStatus.bundler === "pass" && gmgnPass.signalStatus.cto === "pass");
-check("KOL holder count does not clear the celebrity skip", gmgnPass.signalStatus.celebrity === "skipped" && gmgnPass.signalStatus.vamp === "skipped");
-check("rat trader above 0 fails", evaluateEvilPandaGates({ ...clean, gmgn: { ...cleanGmgn, rat_trader_ratio: 0.2 } }, gates, gmgnOptions).signalStatus.insider === "fail");
-check("bundler above 0 fails", evaluateEvilPandaGates({ ...clean, gmgn: { ...cleanGmgn, bundler_ratio: 0.15 } }, gates, gmgnOptions).signalStatus.bundler === "fail");
-check("cto_flag 1 fails", evaluateEvilPandaGates({ ...clean, gmgn: { ...cleanGmgn, cto_flag: 1 } }, gates, gmgnOptions).reasons.join(" ").includes("cto_flag"));
-check("missing rat-trader field skips", evaluateEvilPandaGates({ ...clean, gmgn: { ...cleanGmgn, rat_trader_ratio: null } }, gates, gmgnOptions).reasons.join(" ").includes("top_rat_trader_percentage unavailable"));
-check("missing GMGN object skips", evaluateEvilPandaGates(clean, gates, gmgnOptions).reasons.join(" ").includes("unavailable"));
+check("jupiter audit within caps passes and does not defer bundler", evaluateJupiterPreset(jupBase, gates).pass === true && evaluateJupiterPreset(jupBase, gates).bundlerDeferred === false);
+check("jupiter bundler above 10 fails", evaluateJupiterPreset({ ...jupBase, bundler_pct: 10.1 }, gates).reasons.join(" ").includes("holdingPct"));
+check("jupiter dev above 5 fails", evaluateJupiterPreset({ ...jupBase, dev_pct: 5.1 }, gates).reasons.join(" ").includes("devBalancePercentage"));
+check("jupiter dev mints above 5 fails", evaluateJupiterPreset({ ...jupBase, dev_mints: 6 }, gates).reasons.join(" ").includes("devMints"));
+check("missing jupiter dev balance skips", evaluateJupiterPreset({ ...jupBase, dev_pct: null }, gates).reasons.join(" ").includes("devBalancePercentage unavailable"));
+check("missing bundlerStats defers instead of passing", evaluateJupiterPreset({ ...jupBase, bundler_stats_present: false, bundler_pct: null }, gates).pass === true && evaluateJupiterPreset({ ...jupBase, bundler_stats_present: false, bundler_pct: null }, gates).bundlerDeferred === true);
+check("jupiter call failure skips", evaluateJupiterPreset({ jupiter_ok: false, jupiter_reason: "Jupiter audit call failed — skipped" }, gates).reasons.join(" ").includes("call failed"));
 
-function gmgnEnvelope({ rat = 0, bundler = 0, cto = 0, renowned = 3 } = {}) {
-  return {
-    data: {
-      data: {
-        stat: { top_rat_trader_percentage: rat, top_bundler_trader_percentage: bundler },
-        dev: { cto_flag: cto },
-        wallet_tags_stat: { renowned_wallets: renowned },
-      },
-    },
-  };
+const trackerClean = { ok: true, insider_pct: 4, sniper_pct: 3, bundler_pct: 2 };
+check("solanatracker within caps passes", evaluateTrackerPreset(trackerClean, gates).pass === true);
+check("insider above 10 fails", evaluateTrackerPreset({ ...trackerClean, insider_pct: 11 }, gates).reasons.join(" ").includes("insiders"));
+check("sniper above 10 fails", evaluateTrackerPreset({ ...trackerClean, sniper_pct: 10.01 }, gates).reasons.join(" ").includes("snipers"));
+check("tracker bundler above 10 fails the cross-check", evaluateTrackerPreset({ ...trackerClean, bundler_pct: 12 }, gates).reasons.join(" ").includes("cross-check"));
+check("missing insider field skips", evaluateTrackerPreset({ ...trackerClean, insider_pct: null }, gates).reasons.join(" ").includes("unavailable"));
+check("tracker call failure skips", evaluateTrackerPreset({ ok: false, reason: "SolanaTracker risk call failed — skipped" }, gates).reasons.join(" ").includes("call failed"));
+check("deferred bundler still skips when tracker bundler is missing", evaluateTrackerPreset({ ...trackerClean, bundler_pct: null }, gates, { bundlerDeferred: true }).pass === false);
+check("approved community takeover fails", evaluateCtoPreset({ ok: true, community_takeover: true }).reasons.join(" ").includes("communityTakeover"));
+check("empty dexscreener orders pass", evaluateCtoPreset({ ok: true, community_takeover: false }).pass === true);
+check("dexscreener call failure skips", evaluateCtoPreset({ ok: false, reason: "DexScreener CTO call failed — skipped" }).reasons.join(" ").includes("call failed"));
+
+function jsonResponse(body, ok = true) {
+  return { ok, status: ok ? 200 : 500, json: async () => body };
 }
+function jupiterAsset(mint, audit) {
+  return { id: mint, audit };
+}
+const MINT_A = "MintA1111111111111111111111111111111111";
+const MINT_B = "MintB1111111111111111111111111111111111";
+const cleanAudit = {
+  topHoldersPercentage: 20,
+  botHoldersPercentage: 8,
+  devBalancePercentage: 1,
+  devMints: 1,
+  bundlerStats: { holdingPct: 4 },
+};
 
-check("parser reads the documented GMGN fields", (() => {
-  const parsed = parseGmgnAntiRug(gmgnEnvelope({ rat: 0.05, bundler: 0.1, cto: 1, renowned: 2 }).data.data);
-  return parsed.rat_trader_ratio === 0.05
-    && parsed.bundler_ratio === 0.1
-    && parsed.cto_flag === 1
-    && parsed.renowned_wallets === 2
-    && GMGN_ANTIRUG_FIELDS.insider === "stat.top_rat_trader_percentage"
-    && GMGN_ANTIRUG_FIELDS.bundler === "stat.top_bundler_trader_percentage"
-    && GMGN_ANTIRUG_FIELDS.cto === "dev.cto_flag";
+const calls = [];
+const fetchImpl = async (url, init) => {
+  calls.push({ url: String(url), apiKey: init?.headers?.["x-api-key"] || null });
+  const text = String(url);
+  if (text.includes("assets/search")) {
+    const query = decodeURIComponent(text.split("query=")[1] || "");
+    const ids = query.split(",").filter(Boolean);
+    return jsonResponse(ids.map((id) => jupiterAsset(id, id === MINT_B ? { ...cleanAudit, devBalancePercentage: 40 } : cleanAudit)));
+  }
+  if (text.includes("solanatracker.io") && text.endsWith("/bundlers")) {
+    return jsonResponse({ percentage: 3 });
+  }
+  if (text.includes("solanatracker.io")) {
+    const mint = text.split("/tokens/")[1];
+    if (mint === "THROW") throw new Error("socket down");
+    return jsonResponse({
+      risk: {
+        insiders: { totalPercentage: 2 },
+        snipers: { totalPercentage: 1 },
+        bundlers: { totalPercentage: mint === MINT_A ? 3 : 1 },
+      },
+    });
+  }
+  if (text.includes("dexscreener.com")) {
+    return jsonResponse([]);
+  }
+  throw new Error(`unexpected url ${text}`);
+};
+
+const batched = await batchJupiterAudits([MINT_A, MINT_B], { fetchImpl });
+check("jupiter search is one batched call", calls.filter((call) => call.url.includes("assets/search")).length === 1 && calls.some((call) => decodeURIComponent(call.url).includes(",")));
+check("parser reads jupiter audit fields", (() => {
+  const parsed = parseJupiterAssetAudit(jupiterAsset(MINT_A, cleanAudit));
+  return parsed.bundler_pct === 4 && parsed.dev_pct === 1 && parsed.dev_mints === 1 && parsed.top_holders_pct === 20 && parsed.bundler_stats_present === true;
 })());
+check("batched jupiter returns both mints", batched.get(MINT_A)?.jupiter_ok === true && batched.get(MINT_B)?.dev_pct === 40);
 
-const mockedPass = await getGmgnAntiRug("MintMock111", { fetchTokenInfo: async () => gmgnEnvelope() });
-const mockedGate = evaluateEvilPandaGates({ ...clean, gmgn: mockedPass }, gates, gmgnOptions);
-check("mocked GMGN token info passes the gates", mockedPass.ok === true && mockedGate.pass === true);
-
-const mockedMissing = await getGmgnAntiRug("MintMock111", {
-  fetchTokenInfo: async () => ({ data: { data: { symbol: "NOFIELDS" } } }),
+calls.length = 0;
+const both = await runEvilPandaAntiRug([
+  { pool: { name: "A", base: { mint: MINT_A } }, ti: { global_fees_sol: 60 } },
+  { pool: { name: "B", base: { mint: MINT_B } }, ti: { global_fees_sol: 60 } },
+], gates, {
+  batchJupiterAudits: (mints) => batchJupiterAudits(mints, { fetchImpl }),
+  getSolanaTrackerRisk: (mint) => getSolanaTrackerRisk(mint, { fetchImpl, apiKey: "test-key", paceMs: 0 }),
+  getDexScreenerCto: (mint) => getDexScreenerCto(mint, { fetchImpl, paceMs: 0 }),
 });
-const missingGate = evaluateEvilPandaGates({ ...clean, gmgn: mockedMissing }, gates, gmgnOptions);
-check("mocked GMGN payload with missing fields skips", mockedMissing.ok === true && missingGate.pass === false && missingGate.reasons.join(" ").includes("unavailable") && missingGate.signalStatus.insider === "skipped" && missingGate.signalStatus.cto === "skipped");
+check("jupiter dev reject does not call solanatracker", both.passing.length === 1 && both.passing[0].pool.name === "A" && calls.filter((call) => call.url.includes(MINT_B) && call.url.includes("solanatracker")).length === 0);
+check("solanatracker request uses x-api-key and dexscreener runs only for the passer", calls.some((call) => call.url.includes("solanatracker") && call.apiKey === "test-key") && calls.filter((call) => call.url.includes("dexscreener")).length === 1);
 
-const mockedNull = await getGmgnAntiRug("MintMock111", { fetchTokenInfo: async () => null });
-const nullGate = evaluateEvilPandaGates({ ...clean, gmgn: mockedNull }, gates, gmgnOptions);
-check("mocked empty GMGN response skips", mockedNull.ok === false && mockedNull.reason.includes("unavailable") && nullGate.pass === false);
-
-const mockedThrow = await getGmgnAntiRug("MintMock111", {
-  fetchTokenInfo: async () => { throw new Error("socket down"); },
+calls.length = 0;
+const missingBundlerFetch = async (url, init) => {
+  calls.push(String(url));
+  const text = String(url);
+  if (text.includes("assets/search")) {
+    const { bundlerStats, ...rest } = cleanAudit;
+    return jsonResponse([jupiterAsset(MINT_A, rest)]);
+  }
+  if (text.endsWith("/bundlers")) return jsonResponse({ percentage: 6 });
+  if (text.includes("solanatracker.io")) {
+    return jsonResponse({ risk: { insiders: { totalPercentage: 1 }, snipers: { totalPercentage: 1 } } });
+  }
+  if (text.includes("dexscreener.com")) return jsonResponse([{ type: "tokenProfile", status: "approved" }]);
+  throw new Error(text);
+};
+const deferred = await runEvilPandaAntiRug([
+  { pool: { name: "A", base: { mint: MINT_A } }, ti: { global_fees_sol: 60 } },
+], gates, {
+  batchJupiterAudits: (mints) => batchJupiterAudits(mints, { fetchImpl: missingBundlerFetch }),
+  getSolanaTrackerRisk: (mint) => getSolanaTrackerRisk(mint, { fetchImpl: missingBundlerFetch, apiKey: "test-key", paceMs: 0 }),
+  getDexScreenerCto: (mint) => getDexScreenerCto(mint, { fetchImpl: missingBundlerFetch, paceMs: 0 }),
 });
-const throwGate = evaluateEvilPandaGates({ ...clean, gmgn: mockedThrow }, gates, gmgnOptions);
-check("mocked GMGN call failure skips", mockedThrow.ok === false && mockedThrow.reason.includes("call failed") && throwGate.pass === false && throwGate.signalStatus.insider === "skipped" && throwGate.signalStatus.bundler === "skipped");
+check("missing jupiter bundlerStats falls through to solanatracker bundlers", deferred.passing.length === 1 && calls.some((url) => url.endsWith("/bundlers")));
 
-const noKey = await getGmgnAntiRug("MintMock111", { hasKey: false });
-check("missing GMGN key skips without a network call", noKey.ok === false && noKey.reason.includes("unavailable"));
+calls.length = 0;
+const stillMissing = await runEvilPandaAntiRug([
+  { pool: { name: "A", base: { mint: MINT_A } }, ti: { global_fees_sol: 60 } },
+], gates, {
+  batchJupiterAudits: (mints) => batchJupiterAudits(mints, { fetchImpl: missingBundlerFetch }),
+  getSolanaTrackerRisk: async () => ({ ok: true, insider_pct: 1, sniper_pct: 1, bundler_pct: null }),
+  getDexScreenerCto: async () => { calls.push("dex"); return { ok: true, community_takeover: false }; },
+});
+check("missing bundler on both sources skips and does not call dexscreener", stillMissing.passing.length === 0 && stillMissing.filteredOut[0].reason.includes("unavailable") && !calls.includes("dex"));
+
+const thrown = await runEvilPandaAntiRug([
+  { pool: { name: "A", base: { mint: MINT_A } }, ti: { global_fees_sol: 60 } },
+], gates, {
+  batchJupiterAudits: async () => new Map([[MINT_A, { jupiter_ok: false, jupiter_reason: "Jupiter audit call failed — skipped" }]]),
+  getSolanaTrackerRisk: async () => { throw new Error("should not be called"); },
+  getDexScreenerCto: async () => { throw new Error("should not be called"); },
+});
+check("jupiter call failure skips before later sources", thrown.passing.length === 0 && thrown.filteredOut[0].reason.includes("call failed"));
+
+const trackerDown = await runEvilPandaAntiRug([
+  { pool: { name: "A", base: { mint: MINT_A } }, ti: { global_fees_sol: 60 } },
+], gates, {
+  batchJupiterAudits: async () => new Map([[MINT_A, { jupiter_ok: true, ...parseJupiterAssetAudit(jupiterAsset(MINT_A, cleanAudit)) }]]),
+  getSolanaTrackerRisk: async () => ({ ok: false, reason: "SolanaTracker risk call failed — skipped" }),
+  getDexScreenerCto: async () => { throw new Error("should not be called"); },
+});
+check("solanatracker call failure skips", trackerDown.passing.length === 0 && trackerDown.filteredOut[0].reason.includes("call failed"));
+
+const noTrackerKey = await getSolanaTrackerRisk(MINT_A, { apiKey: "", fetchImpl: async () => { throw new Error("network"); } });
+check("missing solanatracker key skips without a fetch", noTrackerKey.ok === false && noTrackerKey.reason.includes("unavailable"));
+
+const dexThrow = await getDexScreenerCto(MINT_A, { fetchImpl: async () => { throw new Error("socket down"); }, paceMs: 0 });
+check("dexscreener throw skips", dexThrow.ok === false && dexThrow.reason.includes("call failed"));
+const dexBad = await getDexScreenerCto(MINT_A, { fetchImpl: async () => jsonResponse({ orders: [] }), paceMs: 0 });
+check("dexscreener non-array skips", dexBad.ok === false && dexBad.reason.includes("unavailable"));
+const dexCto = await getDexScreenerCto(MINT_A, {
+  fetchImpl: async () => jsonResponse([{ type: "communityTakeover", status: "approved" }]),
+  paceMs: 0,
+});
+check("dexscreener approved communityTakeover is the reject flag", dexCto.community_takeover === true);
 
 const envExample = fs.readFileSync(new URL("../.env.example", import.meta.url), "utf8");
 const readme = fs.readFileSync(new URL("../README.md", import.meta.url), "utf8");
-check("example env documents GMGN_API_KEY", envExample.includes("GMGN_API_KEY="));
-check("README documents GMGN_API_KEY", readme.includes("GMGN_API_KEY"));
+const gmgnSrc = fs.readFileSync(new URL("../tools/gmgn.js", import.meta.url), "utf8");
+check("example env documents SOLANATRACKER_API_KEY", envExample.includes("SOLANATRACKER_API_KEY="));
+check("README documents SOLANATRACKER_API_KEY", readme.includes("SOLANATRACKER_API_KEY"));
+check("preset docs no longer require a GMGN anti-rug key", !envExample.includes("GMGN_API_KEY") && !readme.includes("Evil Panda GMGN"));
+check("fee client still exists and the preset anti-rug export is gone", gmgnSrc.includes("export async function getGmgnTokenFees") && !gmgnSrc.includes("getGmgnAntiRug"));
 const indexSrc = fs.readFileSync(new URL("../index.js", import.meta.url), "utf8");
-check("screening fetches GMGN only for the preset", indexSrc.includes("getGmgnAntiRug") && indexSrc.includes("checkGmgn: true"));
+check("screening uses the free anti-rug path", indexSrc.includes("runEvilPandaAntiRug") && !indexSrc.includes("getGmgnAntiRug"));
 const dlmmSrc = fs.readFileSync(new URL("../tools/dlmm.js", import.meta.url), "utf8");
 check("bin cap and uninitialized-array refusal stay", dlmmSrc.includes("evilPandaMaxTotalBins ?? 140") && dlmmSrc.includes("assertRangeDoesNotRequireBinArrayInitialization"));
 

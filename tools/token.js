@@ -60,6 +60,9 @@ export async function getTokenInfo({ query }) {
       freeze_disabled: t.audit.freezeAuthorityDisabled,
       top_holders_pct: t.audit.topHoldersPercentage?.toFixed(2),
       bot_holders_pct: t.audit.botHoldersPercentage?.toFixed(2),
+      dev_balance_pct: t.audit.devBalancePercentage ?? null,
+      dev_mints: t.audit.devMints ?? null,
+      bundler_holding_pct: t.audit.bundlerStats?.holdingPct ?? null,
       dev_migrations: t.audit.devMigrations,
     } : null,
     stats_1h: t.stats1h ? {
@@ -190,4 +193,83 @@ export async function getTokenHolders({ mint, limit = 20 }) {
     smart_wallets_holding: smartWalletsHolding,
     holders: mapped,
   };
+}
+
+function auditNumber(value) {
+  if (value == null || value === "") return null;
+  const n = Number(value);
+  return Number.isFinite(n) && n >= 0 ? n : null;
+}
+
+/** Raw Jupiter audit fields the Evil Panda preset gates on. Percent fields stay 0–100. */
+export function parseJupiterAssetAudit(asset) {
+  if (!asset || typeof asset !== "object") return null;
+  const mint = asset.id || asset.mint || null;
+  if (!mint) return null;
+  const audit = asset.audit && typeof asset.audit === "object" ? asset.audit : null;
+  const holding = audit?.bundlerStats?.holdingPct;
+  const bundler = auditNumber(holding);
+  return {
+    mint,
+    top_holders_pct: auditNumber(audit?.topHoldersPercentage),
+    bot_holders_pct: auditNumber(audit?.botHoldersPercentage),
+    dev_pct: auditNumber(audit?.devBalancePercentage),
+    dev_mints: auditNumber(audit?.devMints),
+    bundler_pct: bundler,
+    bundler_stats_present: bundler != null,
+  };
+}
+
+async function readJupiterSearch(fetchFn, query) {
+  const res = await fetchFn(`${DATAPI_BASE}/assets/search?query=${encodeURIComponent(query)}`);
+  if (!res?.ok) throw new Error(`Jupiter assets/search ${res?.status ?? "failed"}`);
+  const data = await res.json();
+  return Array.isArray(data) ? data : (data ? [data] : []);
+}
+
+/**
+ * One assets/search for every mint (comma-separated). Mints the batch does
+ * not return are fetched one at a time. A mint that still fails is ok:false.
+ */
+export async function batchJupiterAudits(mints, { fetchImpl } = {}) {
+  const fetchFn = fetchImpl || fetch;
+  const ids = [...new Set((mints || []).map((mint) => String(mint || "").trim()).filter(Boolean))];
+  const byMint = new Map();
+  if (!ids.length) return byMint;
+
+  let batchFailed = false;
+  try {
+    const list = await readJupiterSearch(fetchFn, ids.join(","));
+    for (const asset of list) {
+      const parsed = parseJupiterAssetAudit(asset);
+      if (parsed && ids.includes(parsed.mint)) byMint.set(parsed.mint, { ok: true, jupiter_ok: true, ...parsed });
+    }
+  } catch {
+    batchFailed = true;
+  }
+
+  const missing = ids.filter((id) => !byMint.has(id));
+  if (missing.length && (ids.length > 1 || batchFailed)) {
+    await Promise.all(missing.map(async (id) => {
+      try {
+        const list = await readJupiterSearch(fetchFn, id);
+        const asset = list.find((entry) => (entry?.id || entry?.mint) === id) || list[0];
+        const parsed = parseJupiterAssetAudit(asset);
+        if (!parsed || parsed.mint !== id) {
+          byMint.set(id, { ok: false, jupiter_ok: false, mint: id, jupiter_reason: "Jupiter audit unavailable — skipped" });
+          return;
+        }
+        byMint.set(id, { ok: true, jupiter_ok: true, ...parsed });
+      } catch {
+        byMint.set(id, { ok: false, jupiter_ok: false, mint: id, jupiter_reason: "Jupiter audit call failed — skipped" });
+      }
+    }));
+  }
+
+  for (const id of ids) {
+    if (!byMint.has(id)) {
+      byMint.set(id, { ok: false, jupiter_ok: false, mint: id, jupiter_reason: "Jupiter audit unavailable — skipped" });
+    }
+  }
+  return byMint;
 }

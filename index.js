@@ -30,11 +30,10 @@ import { getActiveStrategy } from "./strategy-library.js";
 import { recordPositionSnapshot, recallForPool, addPoolNote } from "./pool-memory.js";
 import { checkSmartWalletsOnPool } from "./smart-wallets.js";
 import { getTokenNarrative, getTokenInfo } from "./tools/token.js";
-import { getGmgnAntiRug } from "./tools/gmgn.js";
+import { runEvilPandaAntiRug } from "./tools/evil-panda-audit.js";
 import { confirmEvilPandaExit } from "./tools/chart-indicators.js";
 import {
   effectiveMaxPositions,
-  evaluateEvilPandaGates,
   evilPandaParams,
   isEvilPandaActive,
   planEvilPandaManagement,
@@ -486,7 +485,7 @@ export async function runScreeningCycle({ silent = false } = {}) {
     const pandaOn = isEvilPandaActive();
     const strategyBlock = `DEPLOY STRATEGY: ${deployStrategy} (from config) | bins_above: 0 (FIXED — never change) | deposit: SOL only (amount_y, amount_x=0)`
       + (activeStrategy ? `\nSTRATEGY CONTEXT: ${activeStrategy.name} — entry: ${activeStrategy.entry?.condition || "n/a"} | exit: ${activeStrategy.exit?.notes || "n/a"} | best for: ${activeStrategy.best_for}` : "")
-      + (pandaOn ? `\nEVIL PANDA SOL ENTRY: ignore the volatility bins formula. deploy_position forces bid_ask, downside_pct=${config.strategy.evilPandaDownsidePct}, bins_above=0, amount_x=0, and caps total bins at ${config.strategy.evilPandaMaxTotalBins}. The 24h ranging cap is off while this preset is on. One position at a time. GMGN rat-trader, bundler, and CTO gates already dropped failures; a missing GMGN field is a skip.` : "");
+      + (pandaOn ? `\nEVIL PANDA SOL ENTRY: ignore the volatility bins formula. deploy_position forces bid_ask, downside_pct=${config.strategy.evilPandaDownsidePct}, bins_above=0, amount_x=0, and caps total bins at ${config.strategy.evilPandaMaxTotalBins}. The 24h ranging cap is off while this preset is on. One position at a time. Jupiter, SolanaTracker, and DexScreener gates already dropped failures; a missing field is a skip.` : "");
 
     // Fetch top candidates, then recon each sequentially with a small delay to avoid 429s
     const topCandidates = await getTopCandidates({ limit: 10 }).catch(() => null);
@@ -513,7 +512,7 @@ export async function runScreeningCycle({ silent = false } = {}) {
 
     // Hard filters after token recon — block launchpads and excessive Jupiter bot holders
     const filteredOut = [];
-    const passing = [];
+    const launchpadPassed = [];
     for (const row of allCandidates) {
       const { pool, ti } = row;
       const launchpad = ti?.launchpad ?? null;
@@ -527,29 +526,25 @@ export async function runScreeningCycle({ silent = false } = {}) {
         filteredOut.push({ name: pool.name, reason: `blocked launchpad (${launchpad})` });
         continue;
       }
-      const botPct = ti?.audit?.bot_holders_pct;
+      launchpadPassed.push(row);
+    }
+    let passing;
+    if (isEvilPandaActive()) {
+      const antiRug = await runEvilPandaAntiRug(launchpadPassed, evilPandaParams());
+      filteredOut.push(...antiRug.filteredOut);
+      passing = antiRug.passing;
+    } else {
+      passing = [];
       const maxBotHoldersPct = config.screening.maxBotHoldersPct;
-      if (isEvilPandaActive()) {
-        const mint = pool.base?.mint || ti?.mint || null;
-        const gmgn = await getGmgnAntiRug(mint);
-        const gate = evaluateEvilPandaGates({
-          top_holders_pct: ti?.audit?.top_holders_pct ?? pool.top_holders_pct,
-          global_fees_sol: ti?.global_fees_sol,
-          bot_holders_pct: botPct,
-          gmgn,
-        }, evilPandaParams(), { checkTop10: true, checkFees: true, checkBots: true, checkGmgn: true });
-        if (!gate.pass) {
-          const reason = gate.reasons[0];
-          log("screening", `Evil panda filter: dropped ${pool.name} — ${reason}`);
-          filteredOut.push({ name: pool.name, reason });
+      for (const row of launchpadPassed) {
+        const botPct = row.ti?.audit?.bot_holders_pct;
+        if (botPct != null && maxBotHoldersPct != null && botPct > maxBotHoldersPct) {
+          log("screening", `Bot-holder filter: dropped ${row.pool.name} — bots ${botPct}% > ${maxBotHoldersPct}%`);
+          filteredOut.push({ name: row.pool.name, reason: `bot holders ${botPct}% > ${maxBotHoldersPct}%` });
           continue;
         }
-      } else if (botPct != null && maxBotHoldersPct != null && botPct > maxBotHoldersPct) {
-        log("screening", `Bot-holder filter: dropped ${pool.name} — bots ${botPct}% > ${maxBotHoldersPct}%`);
-        filteredOut.push({ name: pool.name, reason: `bot holders ${botPct}% > ${maxBotHoldersPct}%` });
-        continue;
+        passing.push(row);
       }
-      passing.push(row);
     }
 
     if (passing.length === 0) {

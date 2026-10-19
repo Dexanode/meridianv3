@@ -1,5 +1,5 @@
 {
-  "_note": "Optional. GMGN OpenAPI is the fee source for the minTokenFeesSol gate (more accurate than Jupiter's `fees`) and the Evil Panda anti-rug source (stat.top_rat_trader_percentage, stat.top_bundler_trader_percentage, dev.cto_flag on GET /v1/token/info). Copy to gmgn-config.json and fill apiKey, or set GMGN_API_KEY in .env. Fee lookup falls back to Jupiter when the key or call is missing. Evil Panda anti-rug does not: a missing key, payload, or failed call skips the token. Set feeSource to \"jupiter\" to disable the fee lookup only.",
+  "_note": "Optional. GMGN OpenAPI is used as the fee source for the minTokenFeesSol gate (more accurate than Jupiter's `fees`). Copy to gmgn-config.json and fill apiKey, or set GMGN_API_KEY in .env / gmgnApiKey in user-config.json. Set feeSource to \"jupiter\" to disable. Evil Panda anti-rug does not use GMGN.",
   "apiKey": "",
   "baseUrl": "https://openapi.gmgn.ai",
   "requestDelayMs": 2500,
