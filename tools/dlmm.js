@@ -30,6 +30,7 @@ import { appendDecision } from "../decision-log.js";
 import { agentMeridianJson, getAgentIdForRequests, getAgentMeridianHeaders } from "./agent-meridian.js";
 import { getAndClearStagedSignals } from "../signal-tracker.js";
 import { computePositions, fetchDlmmPnlForPool } from "./pnl.js";
+import { capBins, isEvilPandaActive } from "./evil-panda.js";
 
 // ─── Lazy SDK loader ───────────────────────────────────────────
 // @meteora-ag/dlmm → @coral-xyz/anchor uses CJS directory imports
@@ -472,9 +473,31 @@ export async function deployPosition({
   entry_tvl,
   entry_volume,
   entry_holders,
+  mode,
 }) {
   pool_address = normalizeMint(pool_address);
+  const pandaOn = isEvilPandaActive();
+  const tokenFlip = mode === "evil_panda_token_flip";
+  if (tokenFlip && !pandaOn) {
+    throw new Error("Token-sided flip deploy requires strategyPreset=evil_panda_bid_ask_flip.");
+  }
+  if (pandaOn && tokenFlip) {
+    strategy = "bid_ask";
+    amount_y = 0;
+    amount_sol = 0;
+    downside_pct = 0;
+    upside_pct = upside_pct ?? config.strategy.evilPandaUpsidePct;
+    bins_below = 0;
+    bins_above = 0;
+  } else if (pandaOn) {
+    strategy = "bid_ask";
+    amount_x = 0;
+    downside_pct = config.strategy.evilPandaDownsidePct;
+    upside_pct = 0;
+    bins_above = 0;
+  }
   const activeStrategy = strategy || config.strategy.strategy;
+  const deployLeg = tokenFlip ? "token_flip" : (pandaOn ? "sol_entry" : null);
   let activeBinsBelow = bins_below ?? config.strategy.defaultBinsBelow ?? config.strategy.minBinsBelow;
   let activeBinsAbove = bins_above ?? 0;
   const parsedVolatility = volatility == null ? null : Number(volatility);
@@ -542,10 +565,13 @@ export async function deployPosition({
   if (!Number.isFinite(finalAmountY) || !Number.isFinite(finalAmountX) || finalAmountY < 0 || finalAmountX < 0) {
     throw new Error("Invalid deploy amount: amount_x and amount_y must be valid non-negative numbers.");
   }
-  if (finalAmountX > 0) {
+  if (tokenFlip) {
+    if (finalAmountX <= 0 || finalAmountY !== 0) {
+      throw new Error("Evil panda token flip must deposit amount_x only (amount_y=0).");
+    }
+  } else if (finalAmountX > 0) {
     throw new Error("Unsupported deploy amount: this agent only supports single-side SOL deploys. Use amount_y/amount_sol and keep amount_x=0.");
-  }
-  if (finalAmountY <= 0) {
+  } else if (finalAmountY <= 0) {
     throw new Error("Invalid deploy amount: provide a positive amount_y/amount_sol.");
   }
   const isSingleSidedSol = finalAmountX <= 0 && finalAmountY > 0;
@@ -568,6 +594,15 @@ export async function deployPosition({
   if (!Number.isInteger(activeBinsBelow) || !Number.isInteger(activeBinsAbove)) {
     throw new Error("Invalid bin range: bins_below and bins_above must be whole-bin integers.");
   }
+  if (pandaOn) {
+    const capped = capBins(
+      activeBinsBelow,
+      activeBinsAbove,
+      Math.max(MIN_SAFE_BINS_BELOW, Number(config.strategy.evilPandaMaxTotalBins ?? 140)),
+    );
+    activeBinsBelow = capped.binsBelow;
+    activeBinsAbove = capped.binsAbove;
+  }
   const minBinsBelow = Math.max(MIN_SAFE_BINS_BELOW, Number(config.strategy.minBinsBelow ?? MIN_SAFE_BINS_BELOW));
   const totalBins = activeBinsBelow + activeBinsAbove;
   if (totalBins < minBinsBelow) {
@@ -589,6 +624,8 @@ export async function deployPosition({
         amount_x: finalAmountX,
         amount_y: finalAmountY,
         wide_range: totalBins > 69,
+        leg: deployLeg,
+        mode: tokenFlip ? "evil_panda_token_flip" : (pandaOn ? "evil_panda_sol_entry" : null),
       },
       message: "DRY RUN — no transaction sent",
     };
@@ -712,6 +749,7 @@ export async function deployPosition({
           entry_tvl,
           entry_volume,
           entry_holders,
+          leg: deployLeg,
         });
       }
 
@@ -854,6 +892,7 @@ export async function deployPosition({
       entry_tvl,
       entry_volume,
       entry_holders,
+      leg: deployLeg,
     });
 
     appendDecision({
@@ -1327,6 +1366,11 @@ export async function getMyPositions({ force = false, silent = false, wallet_add
           age_minutes:        binData?.createdAt ? Math.floor((Date.now() - binData.createdAt * 1000) / 60000) : ageFromState,
           minutes_out_of_range: minutesOutOfRange(positionAddress),
           instruction:        tracked?.instruction ?? null,
+          leg:                tracked?.leg ?? null,
+          token_amount:       null,
+          sol_amount:         null,
+          token_value_usd:    null,
+          sol_value_usd:      null,
         });
       }
     }

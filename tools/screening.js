@@ -4,6 +4,7 @@ import { isDevBlocked, getBlockedDevs } from "../dev-blocklist.js";
 import { log } from "../logger.js";
 import { isBaseMintOnCooldown, isPoolOnCooldown } from "../pool-memory.js";
 import { confirmIndicatorPreset } from "./chart-indicators.js";
+import { evilPandaDiscoveryReject, evilPandaPreferenceScore, isEvilPandaActive, screeningForActivePreset } from "./evil-panda.js";
 import { getAgentMeridianBase, getAgentMeridianHeaders } from "./agent-meridian.js";
 
 const DATAPI_JUP = "https://datapi.jup.ag/v1";
@@ -521,7 +522,7 @@ async function refreshDiscordOnlyPools(pools, timeframe) {
 export async function discoverPools({
   page_size = 50,
 } = {}) {
-  const s = config.screening;
+  const s = screeningForActivePreset();
   const filters = [
     "base_token_has_critical_warnings=false",
     "quote_token_has_critical_warnings=false",
@@ -619,7 +620,7 @@ export async function discoverPools({
 
   const filteredExamples = [];
   const thresholdedRawPools = rawPools.filter((pool) => {
-    const reason = getRawPoolScreeningRejectReason(pool, s);
+    const reason = getRawPoolScreeningRejectReason(pool, s) || evilPandaDiscoveryReject(pool);
     if (!reason) return true;
     filteredExamples.push({ name: pool.name || pool.pool_address || "unknown pool", reason });
     if (pool.discord_signal) log("screening", `Discord signal filtered: ${pool.name || pool.pool_address} — ${reason}`);
@@ -743,7 +744,13 @@ export async function getTopCandidates({ limit = 10 } = {}) {
       }
       return true;
     })
-    .sort((a, b) => scoreCandidate(b) - scoreCandidate(a))
+    .sort((a, b) => {
+      if (isEvilPandaActive()) {
+        const pref = evilPandaPreferenceScore(b) - evilPandaPreferenceScore(a);
+        if (pref) return pref;
+      }
+      return scoreCandidate(b) - scoreCandidate(a);
+    })
     .slice(0, limit);
 
   if (config.screening.avoidPvpSymbols && eligible.length > 0) {
@@ -878,6 +885,7 @@ function condensePool(p) {
 
     // Token health
     holders: p.base_token_holders,
+    top_holders_pct: numeric(p.token_x?.top_holders_pct),
     mcap: round(p.token_x?.market_cap),
     organic_score: Math.round(p.token_x?.organic_score || 0),
     token_age_hours: p.token_x?.created_at

@@ -1,6 +1,7 @@
 import { config } from "../config.js";
 import { log } from "../logger.js";
 import { agentMeridianJson, getAgentMeridianHeaders } from "./agent-meridian.js";
+import { evilPandaExitTrigger, evilPandaParams } from "./evil-panda.js";
 import { safeNumber } from "../utils/number.js";
 
 const DEFAULT_INTERVALS = ["5_MINUTE"];
@@ -137,6 +138,20 @@ function evaluatePreset(side, preset, payload) {
             reason: "Supertrend bearish confirmation or RSI overbought",
             signal: summary,
           };
+    case "rsi2_above_bb": {
+      // Stricter than bb_plus_rsi: RSI(2) value must be > exitRsiAbove (default 90),
+      // and the close must be strictly above the upper band. bb_plus_rsi uses
+      // rsi >= rsiOverbought (default 80) and close >= upper band.
+      const check = evilPandaExitTrigger(
+        { rsi, close, upperBand },
+        { rsiAbove: evilPandaParams().exitRsiAbove },
+      );
+      return {
+        confirmed: check.confirmed,
+        reason: check.reason,
+        signal: summary,
+      };
+    }
     case "bb_plus_rsi":
       return side === "entry"
         ? {
@@ -222,6 +237,50 @@ async function fetchChartIndicatorsForMint(
   return agentMeridianJson(`/chart-indicators/${mint}?${search.toString()}`, {
     headers: getAgentMeridianHeaders(),
   });
+}
+
+export function evaluateChartPreset(side, preset, payload) {
+  return evaluatePreset(side, preset, payload);
+}
+
+const evilPandaExitCache = new Map();
+const EVIL_PANDA_EXIT_TTL_MS = 60_000;
+
+// Strategy-local exit check. Does not consult indicators.enabled, so the
+// global indicator switch stays off for the existing strategy.
+export async function confirmEvilPandaExit({ mint, refresh = false } = {}) {
+  if (!mint) return { confirmed: false, reason: "missing mint", preset: "rsi2_above_bb" };
+  const cached = evilPandaExitCache.get(mint);
+  if (!refresh && cached && Date.now() - cached.at < EVIL_PANDA_EXIT_TTL_MS) return cached.result;
+
+  let result;
+  try {
+    const payload = await fetchChartIndicatorsForMint(mint, {
+      interval: "5_MINUTE",
+      rsiLength: 2,
+      refresh,
+    });
+    const evaluation = evaluatePreset("exit", "rsi2_above_bb", payload);
+    result = {
+      confirmed: !!evaluation.confirmed,
+      reason: evaluation.reason,
+      signal: evaluation.signal,
+      preset: "rsi2_above_bb",
+      interval: "5_MINUTE",
+      rsiLength: 2,
+    };
+  } catch (error) {
+    result = {
+      confirmed: false,
+      skipped: true,
+      reason: error.message,
+      preset: "rsi2_above_bb",
+      interval: "5_MINUTE",
+      rsiLength: 2,
+    };
+  }
+  evilPandaExitCache.set(mint, { at: Date.now(), result });
+  return result;
 }
 
 export async function confirmIndicatorPreset({

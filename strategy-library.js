@@ -90,6 +90,25 @@ const DEFAULT_STRATEGIES = {
     exit: { take_profit_pct: 10, notes: "When total return >= 10% of deployed capital: withdraw_liquidity(bps=5000) to take 50% off. Remaining 50% keeps running. Repeat at next threshold." },
     best_for: "Locking in profits without fully exiting winning positions",
   },
+  evil_panda_bid_ask_flip: {
+    id: "evil_panda_bid_ask_flip",
+    name: "Evil Panda Bid-Ask Flip",
+    author: "meridian",
+    lp_strategy: "bid_ask",
+    token_criteria: {
+      notes: "Opt-in. Also set strategyPreset to evil_panda_bid_ask_flip (or set this strategy active). Age >= 3 days, top10 <= 30%, SOL fee total > 50, bot holders within maxBotHoldersPct. Insider, bundler, CTO, vamp, and celebrity are not available on the fetched payloads and are skipped, not treated as clean. Prefers base fee ~5-10% and bin step ~125.",
+    },
+    entry: {
+      condition: "SOL-only bid-ask below the active bin, about -80% to -90% (default downside 85%, capped at 140 bins)",
+      single_side: "sol",
+      notes: "Wide downside. The 24h ranging cap is disabled only while this preset is on. Uninitialized bin arrays are still refused.",
+    },
+    range: { type: "wide_down", bins_below_pct: 85, notes: "bins_above=0 on the SOL leg. Total bins capped at 140." },
+    exit: {
+      notes: "5m RSI(2) > 90 AND close above the upper Bollinger band. Mostly token → close (skip swap) and redeploy that token as bid-ask above price. Mostly SOL → close only. Stop-loss and OOR wait still close without a second loss system. Not the single_sided_reseed downside reseed.",
+    },
+    best_for: "One wide SOL bid-ask on a small account, flipped to token-sided only after the bounce signal",
+  },
 };
 
 function ensureDefaultStrategies() {

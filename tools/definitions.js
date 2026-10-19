@@ -390,7 +390,7 @@ Management: minClaimAmount, outOfRangeBinsToClose, outOfRangeWaitMinutes, oorCoo
 Risk: maxPositions, maxDeployAmount
 Schedule: managementIntervalMin, screeningIntervalMin
 Models: managementModel, screeningModel, generalModel
-Strategy: minBinsBelow, maxBinsBelow, defaultBinsBelow (legacy binsBelow maps to maxBinsBelow)
+Strategy: strategy, strategyPreset (null, or evil_panda_bid_ask_flip), evilPandaDownsidePct, evilPandaUpsidePct, evilPandaMaxTotalBins, evilPandaMinFeesSol, evilPandaMaxTop10Pct, evilPandaMaxPositions, evilPandaExitRsiAbove, evilPandaTokenMajorityPct, minBinsBelow, maxBinsBelow, defaultBinsBelow (legacy binsBelow maps to maxBinsBelow)
 
 Reason is optional but helpful — logged as a lesson when provided.`,
       parameters: {

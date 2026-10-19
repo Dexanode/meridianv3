@@ -21,6 +21,7 @@ import { blockDev, unblockDev, listBlockedDevs } from "../dev-blocklist.js";
 import { addSmartWallet, removeSmartWallet, listSmartWallets, checkSmartWalletsOnPool } from "../smart-wallets.js";
 import { getTokenInfo, getTokenHolders, getTokenNarrative } from "./token.js";
 import { config, reloadScreeningThresholds, MIN_SAFE_BINS_BELOW } from "../config.js";
+import { effectiveMaxPositions, evaluateEvilPandaGates, evilPandaParams, isEvilPandaActive } from "./evil-panda.js";
 import { getRecentDecisions } from "../decision-log.js";
 import fs from "fs";
 import { execSync, spawn } from "child_process";
@@ -164,6 +165,15 @@ async function validateDeployPoolThresholds(args) {
     };
   }
 
+  if (isEvilPandaActive() && args.mode !== "evil_panda_token_flip") {
+    const gate = evaluateEvilPandaGates(
+      { top_holders_pct: detail?.token_x?.top_holders_pct },
+      evilPandaParams(),
+      { checkTop10: true, checkFees: false, checkBots: false },
+    );
+    if (!gate.pass) return { pass: false, reason: gate.reasons[0] };
+  }
+
   const baseMint = detail?.token_x?.address || detail?.base_token_address || null;
   const entryMarketData = {
     entry_mcap: numberOrNull(detail?.token_x?.market_cap ?? detail?.base_token_market_cap),
@@ -223,6 +233,7 @@ function normalizeConfigValue(key, value) {
     "category",
     "discordSignalMode",
     "strategy",
+    "strategyPreset",
     "managementModel",
     "screeningModel",
     "generalModel",
@@ -429,6 +440,15 @@ const toolMap = {
       maxSteps: ["llm", "maxSteps"],
       // strategy
       strategy: ["strategy", "strategy"],
+      strategyPreset: ["strategy", "preset"],
+      evilPandaDownsidePct: ["strategy", "evilPandaDownsidePct"],
+      evilPandaUpsidePct: ["strategy", "evilPandaUpsidePct"],
+      evilPandaMaxTotalBins: ["strategy", "evilPandaMaxTotalBins"],
+      evilPandaMinFeesSol: ["strategy", "evilPandaMinFeesSol"],
+      evilPandaMaxTop10Pct: ["strategy", "evilPandaMaxTop10Pct"],
+      evilPandaMaxPositions: ["strategy", "evilPandaMaxPositions"],
+      evilPandaExitRsiAbove: ["strategy", "evilPandaExitRsiAbove"],
+      evilPandaTokenMajorityPct: ["strategy", "evilPandaTokenMajorityPct"],
       binsBelow: ["strategy", "maxBinsBelow", ["maxBinsBelow"]],
       minBinsBelow: ["strategy", "minBinsBelow"],
       maxBinsBelow: ["strategy", "maxBinsBelow"],
@@ -745,7 +765,21 @@ async function runSafetyChecks(name, args) {
 
       const deployAmountY = Number(args.amount_y ?? args.amount_sol ?? 0);
       const deployAmountX = Number(args.amount_x ?? 0);
-      if (Number.isFinite(deployAmountX) && deployAmountX > 0) {
+      const tokenFlip = args.mode === "evil_panda_token_flip";
+      if (tokenFlip && !isEvilPandaActive()) {
+        return {
+          pass: false,
+          reason: "Token-sided flip deploy requires strategyPreset=evil_panda_bid_ask_flip.",
+        };
+      }
+      if (tokenFlip) {
+        if (!(deployAmountX > 0) || deployAmountY !== 0) {
+          return {
+            pass: false,
+            reason: "Evil panda token flip must deposit amount_x only (amount_y=0).",
+          };
+        }
+      } else if (Number.isFinite(deployAmountX) && deployAmountX > 0) {
         return {
           pass: false,
           reason: "This agent only supports single-side SOL deploys. Use amount_y/amount_sol and keep amount_x=0.",
@@ -804,16 +838,20 @@ async function runSafetyChecks(name, args) {
 
       // Check position count limit + duplicate pool guard — force fresh scan to avoid stale cache
       const positions = await getMyPositions({ force: true });
-      if (positions.total_positions >= config.risk.maxPositions) {
+      const maxPositions = effectiveMaxPositions();
+      const countedPositions = tokenFlip
+        ? (positions.positions || []).filter((p) => p.pool !== args.pool_address).length
+        : positions.total_positions;
+      if (countedPositions >= maxPositions) {
         return {
           pass: false,
-          reason: `Max positions (${config.risk.maxPositions}) reached. Close a position first.`,
+          reason: `Max positions (${maxPositions}) reached. Close a position first.`,
         };
       }
       const alreadyInPool = positions.positions.some(
         (p) => p.pool === args.pool_address
       );
-      if (alreadyInPool) {
+      if (alreadyInPool && !tokenFlip) {
         return {
           pass: false,
           reason: `Already have an open position in pool ${args.pool_address}. Cannot open duplicate.`,
@@ -823,7 +861,7 @@ async function runSafetyChecks(name, args) {
       // Block same base token across different pools
       if (args.base_mint) {
         const alreadyHasMint = positions.positions.some(
-          (p) => p.base_mint === args.base_mint
+          (p) => p.base_mint === args.base_mint && !(tokenFlip && p.pool === args.pool_address)
         );
         if (alreadyHasMint) {
           return {
@@ -833,38 +871,49 @@ async function runSafetyChecks(name, args) {
         }
       }
 
-      // Check amount limits
-      const amountY = deployAmountY;
-      if (!Number.isFinite(amountY) || amountY <= 0) {
-        return {
-          pass: false,
-          reason: `Must provide a positive SOL amount (amount_y).`,
-        };
-      }
-
-      const minDeploy = Math.max(0.1, config.management.deployAmountSol);
-      if (amountY < minDeploy) {
-        return {
-          pass: false,
-          reason: `Amount ${amountY} SOL is below the minimum deploy amount (${minDeploy} SOL). Use at least ${minDeploy} SOL.`,
-        };
-      }
-      if (amountY > config.risk.maxDeployAmount) {
-        return {
-          pass: false,
-          reason: `SOL amount ${amountY} exceeds maximum allowed per position (${config.risk.maxDeployAmount}).`,
-        };
-      }
-
-      // Check SOL balance
-      if (process.env.DRY_RUN !== "true") {
-        const balance = await getWalletBalances();
-        const gasReserve = config.management.gasReserve;
-        const minRequired = amountY + gasReserve;
-        if (balance.sol < minRequired) {
+      // Check amount limits. The token-flip leg deposits the base token, not SOL.
+      if (!tokenFlip) {
+        const amountY = deployAmountY;
+        if (!Number.isFinite(amountY) || amountY <= 0) {
           return {
             pass: false,
-            reason: `Insufficient SOL: have ${balance.sol} SOL, need ${minRequired} SOL (${amountY} deploy + ${gasReserve} gas reserve).`,
+            reason: `Must provide a positive SOL amount (amount_y).`,
+          };
+        }
+
+        const minDeploy = Math.max(0.1, config.management.deployAmountSol);
+        if (amountY < minDeploy) {
+          return {
+            pass: false,
+            reason: `Amount ${amountY} SOL is below the minimum deploy amount (${minDeploy} SOL). Use at least ${minDeploy} SOL.`,
+          };
+        }
+        if (amountY > config.risk.maxDeployAmount) {
+          return {
+            pass: false,
+            reason: `SOL amount ${amountY} exceeds maximum allowed per position (${config.risk.maxDeployAmount}).`,
+          };
+        }
+
+        // Check SOL balance
+        if (process.env.DRY_RUN !== "true") {
+          const balance = await getWalletBalances();
+          const gasReserve = config.management.gasReserve;
+          const minRequired = amountY + gasReserve;
+          if (balance.sol < minRequired) {
+            return {
+              pass: false,
+              reason: `Insufficient SOL: have ${balance.sol} SOL, need ${minRequired} SOL (${amountY} deploy + ${gasReserve} gas reserve).`,
+            };
+          }
+        }
+      } else if (process.env.DRY_RUN !== "true") {
+        const balance = await getWalletBalances();
+        const gasReserve = config.management.gasReserve ?? 0;
+        if ((balance.sol ?? 0) < gasReserve) {
+          return {
+            pass: false,
+            reason: `Insufficient SOL for gas reserve: have ${balance.sol} SOL, need ${gasReserve} SOL.`,
           };
         }
       }

@@ -30,6 +30,14 @@ import { getActiveStrategy } from "./strategy-library.js";
 import { recordPositionSnapshot, recallForPool, addPoolNote } from "./pool-memory.js";
 import { checkSmartWalletsOnPool } from "./smart-wallets.js";
 import { getTokenNarrative, getTokenInfo } from "./tools/token.js";
+import { confirmEvilPandaExit } from "./tools/chart-indicators.js";
+import {
+  effectiveMaxPositions,
+  evaluateEvilPandaGates,
+  evilPandaParams,
+  isEvilPandaActive,
+  planEvilPandaManagement,
+} from "./tools/evil-panda.js";
 import { stageSignals } from "./signal-tracker.js";
 import { getWeightsSummary } from "./signal-weights.js";
 import { bootstrapHiveMind, ensureAgentId, getHiveMindPullMode, isHiveMindEnabled, pullHiveMindLessons, pullHiveMindPresets, registerHiveMindAgent, startHiveMindBackgroundSync } from "./hivemind.js";
@@ -144,6 +152,35 @@ async function maybeRunMissedBriefing() {
   await runBriefing();
 }
 
+async function redeployEvilPandaTokenLeg(position) {
+  const params = evilPandaParams();
+  let amountX = Number(position?.token_amount);
+  try {
+    const balances = await getWalletBalances();
+    const token = balances.tokens?.find((entry) => entry.mint === position?.base_mint);
+    if (token?.balance > 0) amountX = Number(token.balance);
+  } catch (error) {
+    log("cron_warn", `Evil panda flip balance lookup failed: ${error.message}`);
+  }
+  if (!Number.isFinite(amountX) || amountX <= 0) {
+    return { ok: false, error: "no token balance to redeploy" };
+  }
+  const res = await executeTool("deploy_position", {
+    pool_address: position.pool,
+    pool_name: position.pair,
+    base_mint: position.base_mint,
+    amount_x: amountX,
+    amount_y: 0,
+    strategy: "bid_ask",
+    upside_pct: params.upsidePct,
+    downside_pct: 0,
+    bins_below: 0,
+    mode: "evil_panda_token_flip",
+  }).catch((error) => ({ error: error.message }));
+  const ok = res?.blocked !== true && !res?.error && res?.success !== false && (res?.dry_run || res?.position || res?.would_deploy);
+  return { ok, res };
+}
+
 function stopCronJobs() {
   for (const task of _cronTasks) task.stop();
   if (_cronTasks._pnlPollInterval) clearInterval(_cronTasks._pnlPollInterval);
@@ -171,13 +208,26 @@ async function executeManagementActions(actionPositions, actionMap, { liveMessag
     const act = actionMap.get(p.position);
     if (act.action === "INSTRUCTION") { instructionPositions.push(p); continue; }
 
-    if (act.action === "CLOSE") {
+    if (act.action === "CLOSE" || act.action === "FLIP") {
+      const flipping = act.action === "FLIP";
       const reason = act.reason || (act.rule ? `Rule ${act.rule}` : "rule close");
       await liveMessage?.toolStart("close_position");
-      const res = await executeTool("close_position", { position_address: p.position, reason }).catch(e => ({ error: e.message }));
+      const res = await executeTool("close_position", {
+        position_address: p.position,
+        reason,
+        skip_swap: flipping ? true : undefined,
+      }).catch(e => ({ error: e.message }));
       const ok = res?.success !== false && !res?.error && !res?.blocked;
       await liveMessage?.toolFinish("close_position", res, ok);
-      lines.push(`${p.pair}: ${ok ? `closed (${reason})` : `close FAILED — ${res?.error || res?.reason || "unknown"}`}`);
+      if (!flipping) {
+        lines.push(`${p.pair}: ${ok ? `closed (${reason})` : `close FAILED — ${res?.error || res?.reason || "unknown"}`}`);
+      } else if (!ok) {
+        lines.push(`${p.pair}: flip close FAILED — ${res?.error || res?.reason || "unknown"}`);
+      } else {
+        const redeploy = await redeployEvilPandaTokenLeg(p);
+        const deployed = redeploy.ok;
+        lines.push(`${p.pair}: ${deployed ? `flipped to token-sided bid-ask above price (${reason})` : `closed for flip but redeploy FAILED — ${redeploy.error || redeploy.res?.error || redeploy.res?.reason || "unknown"}`}`);
+      }
     } else if (act.action === "CLAIM") {
       await liveMessage?.toolStart("claim_fees");
       const res = await executeTool("claim_fees", { position_address: p.position }).catch(e => ({ error: e.message }));
@@ -289,6 +339,19 @@ export async function runManagementCycle({ silent = false } = {}) {
       actionMap.set(p.position, { action: "STAY" });
     }
 
+    if (isEvilPandaActive()) {
+      for (const p of positionData) {
+        if (actionMap.get(p.position)?.action !== "STAY") continue;
+        const trigger = await confirmEvilPandaExit({ mint: p.base_mint });
+        const plan = planEvilPandaManagement({ position: p, exitTrigger: trigger, cutLossRule: null });
+        if (plan.action === "flip") {
+          actionMap.set(p.position, { action: "FLIP", rule: "evil_panda_flip", reason: plan.reason });
+        } else if (plan.action === "close") {
+          actionMap.set(p.position, { action: "CLOSE", rule: "evil_panda_exit", reason: plan.reason });
+        }
+      }
+    }
+
     // ── Build JS report ──────────────────────────────────────────────
     const totalValue = positionData.reduce((s, p) => s + (p.total_value_usd ?? 0), 0);
     const totalUnclaimed = positionData.reduce((s, p) => s + (p.unclaimed_fees_usd ?? 0), 0);
@@ -333,8 +396,9 @@ export async function runManagementCycle({ silent = false } = {}) {
     // Trigger screening after management
     const afterPositions = await getMyPositions({ force: true }).catch(() => null);
     const afterCount = afterPositions?.positions?.length ?? 0;
-    if (afterCount < config.risk.maxPositions && Date.now() - _screeningLastTriggered > screeningCooldownMs) {
-      log("cron", `Post-management: ${afterCount}/${config.risk.maxPositions} positions — triggering screening`);
+    const positionCap = effectiveMaxPositions();
+    if (afterCount < positionCap && Date.now() - _screeningLastTriggered > screeningCooldownMs) {
+      log("cron", `Post-management: ${afterCount}/${positionCap} positions — triggering screening`);
       runScreeningCycle().catch((e) => log("cron_error", `Triggered screening failed: ${e.message}`));
     }
   } catch (error) {
@@ -369,16 +433,17 @@ export async function runScreeningCycle({ silent = false } = {}) {
   let prePositions, preBalance;
   let liveMessage = null;
   let screenReport = null;
+  const positionCap = effectiveMaxPositions();
   try {
     [prePositions, preBalance] = await Promise.all([getMyPositions({ force: true }), getWalletBalances()]);
-    if (prePositions.total_positions >= config.risk.maxPositions) {
-      log("cron", `Screening skipped — max positions reached (${prePositions.total_positions}/${config.risk.maxPositions})`);
-      screenReport = `Screening skipped — max positions reached (${prePositions.total_positions}/${config.risk.maxPositions}).`;
+    if (prePositions.total_positions >= positionCap) {
+      log("cron", `Screening skipped — max positions reached (${prePositions.total_positions}/${positionCap})`);
+      screenReport = `Screening skipped — max positions reached (${prePositions.total_positions}/${positionCap}).`;
       appendDecision({
         type: "skip",
         actor: "SCREENER",
         summary: "Screening skipped",
-        reason: `Max positions reached (${prePositions.total_positions}/${config.risk.maxPositions})`,
+        reason: `Max positions reached (${prePositions.total_positions}/${positionCap})`,
       });
       _screeningBusy = false;
       return screenReport;
@@ -417,8 +482,10 @@ export async function runScreeningCycle({ silent = false } = {}) {
     // Load active strategy
     const activeStrategy = getActiveStrategy();
     const deployStrategy = config.strategy.strategy;
+    const pandaOn = isEvilPandaActive();
     const strategyBlock = `DEPLOY STRATEGY: ${deployStrategy} (from config) | bins_above: 0 (FIXED — never change) | deposit: SOL only (amount_y, amount_x=0)`
-      + (activeStrategy ? `\nSTRATEGY CONTEXT: ${activeStrategy.name} — entry: ${activeStrategy.entry?.condition || "n/a"} | exit: ${activeStrategy.exit?.notes || "n/a"} | best for: ${activeStrategy.best_for}` : "");
+      + (activeStrategy ? `\nSTRATEGY CONTEXT: ${activeStrategy.name} — entry: ${activeStrategy.entry?.condition || "n/a"} | exit: ${activeStrategy.exit?.notes || "n/a"} | best for: ${activeStrategy.best_for}` : "")
+      + (pandaOn ? `\nEVIL PANDA SOL ENTRY: ignore the volatility bins formula. deploy_position forces bid_ask, downside_pct=${config.strategy.evilPandaDownsidePct}, bins_above=0, amount_x=0, and caps total bins at ${config.strategy.evilPandaMaxTotalBins}. The 24h ranging cap is off while this preset is on. One position at a time.` : "");
 
     // Fetch top candidates, then recon each sequentially with a small delay to avoid 429s
     const topCandidates = await getTopCandidates({ limit: 10 }).catch(() => null);
@@ -459,7 +526,19 @@ export async function runScreeningCycle({ silent = false } = {}) {
       }
       const botPct = ti?.audit?.bot_holders_pct;
       const maxBotHoldersPct = config.screening.maxBotHoldersPct;
-      if (botPct != null && maxBotHoldersPct != null && botPct > maxBotHoldersPct) {
+      if (isEvilPandaActive()) {
+        const gate = evaluateEvilPandaGates({
+          top_holders_pct: ti?.audit?.top_holders_pct ?? pool.top_holders_pct,
+          global_fees_sol: ti?.global_fees_sol,
+          bot_holders_pct: botPct,
+        }, evilPandaParams(), { checkTop10: true, checkFees: true, checkBots: true });
+        if (!gate.pass) {
+          const reason = gate.reasons[0];
+          log("screening", `Evil panda filter: dropped ${pool.name} — ${reason}`);
+          filteredOut.push({ name: pool.name, reason });
+          return false;
+        }
+      } else if (botPct != null && maxBotHoldersPct != null && botPct > maxBotHoldersPct) {
         log("screening", `Bot-holder filter: dropped ${pool.name} — bots ${botPct}% > ${maxBotHoldersPct}%`);
         filteredOut.push({ name: pool.name, reason: `bot holders ${botPct}% > ${maxBotHoldersPct}%` });
         return false;
@@ -572,7 +651,7 @@ export async function runScreeningCycle({ silent = false } = {}) {
     const { content } = await agentLoop(`
 SCREENING CYCLE
 ${strategyBlock}
-Positions: ${prePositions.total_positions}/${config.risk.maxPositions} | SOL: ${currentBalance.sol.toFixed(3)} | Deploy: ${deployAmount} SOL
+Positions: ${prePositions.total_positions}/${positionCap} | SOL: ${currentBalance.sol.toFixed(3)} | Deploy: ${deployAmount} SOL
 
 PRE-LOADED CANDIDATES (${passing.length} pools):
 ${candidateBlocks.join("\n\n")}
@@ -737,19 +816,34 @@ Summarize the current portfolio health, total fees earned, and performance of al
         // Detect an exit signal this tick (rule-based exits, then deterministic close rules).
         const exit = updatePnlAndCheckExits(p.position, p, config.management);
         const closeRule = exit ? null : getDeterministicCloseRule(p, config.management);
-        let signal = null, reason = null, rule = "exit";
+        let signal = null, reason = null, rule = "exit", pandaAction = null;
         if (exit) { signal = exit.action; reason = exit.reason; }
         else if (closeRule) { signal = `RULE_${closeRule.rule}`; reason = closeRule.reason; rule = closeRule.rule; }
+        else if (isEvilPandaActive()) {
+          const trigger = await confirmEvilPandaExit({ mint: p.base_mint });
+          const plan = planEvilPandaManagement({ position: p, exitTrigger: trigger, cutLossRule: null });
+          if (plan.action === "flip") {
+            signal = "EVIL_PANDA_FLIP";
+            reason = plan.reason;
+            pandaAction = "FLIP";
+            rule = "evil_panda_flip";
+          } else if (plan.action === "close") {
+            signal = "EVIL_PANDA_EXIT";
+            reason = plan.reason;
+            pandaAction = "CLOSE";
+            rule = "evil_panda_exit";
+          }
+        }
 
         // Require N consecutive confirming ticks before acting.
         const { fire } = registerExitSignal(p.position, signal, confirmTicks);
         if (!signal || !fire) continue;
 
-        log("state", `[PnL poll] ${signal} confirmed (${confirmTicks} ticks): ${p.pair} — ${reason} — closing directly`);
+        log("state", `[PnL poll] ${signal} confirmed (${confirmTicks} ticks): ${p.pair} — ${reason} — ${pandaAction === "FLIP" ? "flipping" : "closing"} directly`);
         // Hold the management lock so the cron cycle can't double-act on this position.
         _managementBusy = true;
         try {
-          const actMap = new Map([[p.position, { action: "CLOSE", rule, reason }]]);
+          const actMap = new Map([[p.position, { action: pandaAction || "CLOSE", rule, reason }]]);
           const rpt = await executeManagementActions([p], actMap, {});
           log("state", `[PnL poll] ${p.pair}: ${rpt || "closed"}`);
         } catch (e) {
@@ -782,7 +876,7 @@ Summarize the current portfolio health, total fees earned, and performance of al
           getMyPositions({ force: true, silent: true }).catch(() => null),
           getWalletBalances().catch(() => null),
         ]);
-        if (!positions || (positions.total_positions ?? 0) >= config.risk.maxPositions) return;
+        if (!positions || (positions.total_positions ?? 0) >= effectiveMaxPositions()) return;
         const minRequired = config.management.deployAmountSol + config.management.gasReserve;
         if (process.env.DRY_RUN !== "true" && (!balance || balance.sol < minRequired)) return;
 
@@ -998,7 +1092,7 @@ function formatConfigSnapshot() {
   return [
     "Config snapshot",
     "",
-    `Strategy: ${config.strategy.strategy} | binsBelow: ${config.strategy.minBinsBelow}-${config.strategy.maxBinsBelow} | default ${config.strategy.defaultBinsBelow}`,
+    `Strategy: ${config.strategy.strategy} | preset: ${config.strategy.preset || "off"} | binsBelow: ${config.strategy.minBinsBelow}-${config.strategy.maxBinsBelow} | default ${config.strategy.defaultBinsBelow}`,
     `Deploy: ${config.management.deployAmountSol} SOL | gasReserve: ${config.management.gasReserve} | maxPositions: ${config.risk.maxPositions}`,
     `Stop loss: ${config.management.stopLossPct}% | take profit: ${config.management.takeProfitPct}%`,
     `Trailing: ${config.management.trailingTakeProfit ? "on" : "off"} | trigger ${config.management.trailingTriggerPct}% | drop ${config.management.trailingDropPct}%`,
