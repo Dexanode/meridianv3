@@ -6,13 +6,14 @@
 
 // Pool discovery API accepts: 5m, 30m, 1h, 2h, 4h, 12h, 24h (no 15m).
 export const TIMEFRAME_SCREENING_SCALES = {
-  "5m":  { minFeeActiveTvlRatio: 0.02, minVolume: 500 },
-  "30m": { minFeeActiveTvlRatio: 0.15, minVolume: 1_000 },
-  "1h":  { minFeeActiveTvlRatio: 0.2,  minVolume: 10_000 },
-  "2h":  { minFeeActiveTvlRatio: 0.4,  minVolume: 20_000 },
-  "4h":  { minFeeActiveTvlRatio: 0.4,  minVolume: 2_000 },
-  "12h": { minFeeActiveTvlRatio: 1.5,  minVolume: 60_000 },
-  "24h": { minFeeActiveTvlRatio: 2.0,  minVolume: 10_000 },
+  // minVolume stays 0 on every window: volume is not a qualifying floor.
+  "5m":  { minFeeActiveTvlRatio: 0.02, minVolume: 0 },
+  "30m": { minFeeActiveTvlRatio: 0.15, minVolume: 0 },
+  "1h":  { minFeeActiveTvlRatio: 0.2,  minVolume: 0 },
+  "2h":  { minFeeActiveTvlRatio: 0.4,  minVolume: 0 },
+  "4h":  { minFeeActiveTvlRatio: 0.4,  minVolume: 0 },
+  "12h": { minFeeActiveTvlRatio: 1.5,  minVolume: 0 },
+  "24h": { minFeeActiveTvlRatio: 2.0,  minVolume: 0 },
 };
 
 const DEFAULT_TIMEFRAME = "4h";

@@ -76,11 +76,11 @@ export const config = {
     minFeeActiveTvlRatio: u.minFeeActiveTvlRatio ?? 0.05,
     minTvl:            u.minTvl            ?? 10_000,
     maxTvl:            u.maxTvl !== undefined ? u.maxTvl : 150_000,
-    minVolume:         u.minVolume         ?? 500,
+    minVolume:         u.minVolume         ?? 0, // 0 = no fixed volume floor
     minOrganic:        u.minOrganic        ?? 60,
     minQuoteOrganic:   u.minQuoteOrganic   ?? 60,
     minHolders:        u.minHolders        ?? 500,
-    minMcap:           u.minMcap           ?? 150_000,
+    minMcap:           u.minMcap           ?? 1_000_000,
     maxMcap:           u.maxMcap           ?? 10_000_000,
     minBinStep:        u.minBinStep        ?? 80,
     maxBinStep:        u.maxBinStep        ?? 125,
@@ -96,8 +96,13 @@ export const config = {
     loneCandidateMinDegen: u.loneCandidateMinDegen ?? 50, // degen score that lets a SOLO candidate deploy without a narrative
     allowedLaunchpads: u.allowedLaunchpads ?? [],  // allow-list launchpads, [] = no allow-list
     blockedLaunchpads:  u.blockedLaunchpads  ?? [],  // e.g. ["letsbonk.fun", "pump.fun"]
-    minTokenAgeHours:   u.minTokenAgeHours   ?? null, // null = no minimum
+    minTokenAgeHours:   u.minTokenAgeHours !== undefined ? u.minTokenAgeHours : 72, // hours; 72 = 3 days. null disables
     maxTokenAgeHours:   u.maxTokenAgeHours   ?? null, // null = no maximum
+    // 24h fee/active-TVL percent (same unit as fee_active_tvl_ratio). Not annualized APR.
+    // A pool must be strictly above this. null or 0 disables.
+    minFeeActiveTvl24h: u.minFeeActiveTvl24h !== undefined ? u.minFeeActiveTvl24h : 5,
+    // |24h net price change| cap. Ranging proxy: sideways, not a hard trend. null disables.
+    maxAbsPriceChange24hPct: u.maxAbsPriceChange24hPct !== undefined ? u.maxAbsPriceChange24hPct : 15,
   },
 
   // ─── Position Management ────────────────
@@ -118,7 +123,7 @@ export const config = {
     minVolumeToRebalance:  u.minVolumeToRebalance  ?? 1000,
     stopLossPct:           u.stopLossPct           ?? u.emergencyPriceDropPct ?? -50,
     takeProfitPct:         u.takeProfitPct         ?? u.takeProfitFeePct ?? 5,
-    minFeePerTvl24h:       u.minFeePerTvl24h       ?? 7,
+    minFeePerTvl24h:       u.minFeePerTvl24h       ?? 3, // percent; low-yield close floor (feePerTvl24h)
     minAgeBeforeYieldCheck: u.minAgeBeforeYieldCheck ?? 60, // minutes before low yield can trigger close
     minSolToOpen:          u.minSolToOpen          ?? 0.55,
     deployAmountSol:       u.deployAmountSol       ?? 0.5,
@@ -317,6 +322,8 @@ export function reloadScreeningThresholds() {
     if (fresh.category          != null) s.category          = fresh.category;
     if (fresh.minTokenAgeHours  !== undefined) s.minTokenAgeHours = fresh.minTokenAgeHours;
     if (fresh.maxTokenAgeHours  !== undefined) s.maxTokenAgeHours = fresh.maxTokenAgeHours;
+    if (fresh.minFeeActiveTvl24h !== undefined) s.minFeeActiveTvl24h = fresh.minFeeActiveTvl24h;
+    if (fresh.maxAbsPriceChange24hPct !== undefined) s.maxAbsPriceChange24hPct = fresh.maxAbsPriceChange24hPct;
     if (fresh.avoidPvpSymbols   !== undefined) s.avoidPvpSymbols = fresh.avoidPvpSymbols;
     if (fresh.blockPvpSymbols   !== undefined) s.blockPvpSymbols = fresh.blockPvpSymbols;
     if (fresh.maxBotHoldersPct  != null) s.maxBotHoldersPct = fresh.maxBotHoldersPct;
